@@ -1940,10 +1940,36 @@ function serializeTracker(value) {
   return JSON.stringify(value, null, 2) ?? "{}";
 }
 
+// src/abortable.ts
+function cancellationError() {
+  const error = new Error("SceneMap generation was cancelled.");
+  error.name = "AbortError";
+  return error;
+}
+function raceWithAbort(operation, signal) {
+  if (signal.aborted)
+    return Promise.reject(cancellationError());
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      signal.removeEventListener("abort", onAbort);
+      reject(cancellationError());
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    operation.then((value) => {
+      signal.removeEventListener("abort", onAbort);
+      resolve(value);
+    }, (error) => {
+      signal.removeEventListener("abort", onAbort);
+      reject(error);
+    });
+  });
+}
+
 // src/backend.ts
 var activeGenerations = new GenerationRegistry;
 var statePushQueue = new KeyedAsyncQueue;
 var settingsSaveQueue = new KeyedAsyncQueue;
+var STATE_BUILD_TIMEOUT_MS = 1e4;
 var macroLayoutsByChatId = new Map;
 var alternateCharacterFields = ["description", "personality", "scenario"];
 async function loadSettings(userId) {
@@ -1977,6 +2003,16 @@ function throwIfGenerationCancelled(signal) {
   const error = new Error("SceneMap generation was cancelled.");
   error.name = "AbortError";
   throw error;
+}
+function withTimeout(operation, timeoutMs, message) {
+  let timer = null;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  return Promise.race([operation, timeout]).finally(() => {
+    if (timer)
+      clearTimeout(timer);
+  });
 }
 function isGenerationResponse(value) {
   return Boolean(value && typeof value === "object" && typeof value.content === "string");
@@ -2325,6 +2361,8 @@ async function buildState(userId) {
       userId
     });
   }
+  const connections = await listConnections(userId);
+  const activeGeneration = activeGenerations.get(userId);
   return {
     settings,
     chatId: chat?.id ?? null,
@@ -2334,14 +2372,14 @@ async function buildState(userId) {
     autoGenerateMessagesRemaining: getAutoGenerateMessagesRemaining(settings, messages, latest, activeMessage),
     activeMessageId: activeMessage?.id ?? null,
     activeSwipeId: activeMessage ? getActiveSwipeId(activeMessage) : null,
-    generationActive: activeGenerations.get(userId) !== null,
-    generatingMessageId: getActiveGenerationMessageId(userId),
-    connections: await listConnections(userId)
+    generationActive: activeGeneration !== null,
+    generatingMessageId: activeGeneration?.messageId ?? null,
+    connections
   };
 }
 function pushState(userId, response = {}) {
   return statePushQueue.enqueue(userId, async () => {
-    const state = await buildState(userId);
+    const state = await withTimeout(buildState(userId), STATE_BUILD_TIMEOUT_MS, "SceneMap timed out while refreshing its state.");
     if (state.chatId) {
       const preset = state.settings.schemaPresets[state.effectivePresetKey] ?? state.settings.schemaPresets[state.settings.schemaPreset] ?? state.settings.schemaPresets.default;
       macroLayoutsByChatId.set(state.chatId, {
@@ -2351,6 +2389,20 @@ function pushState(userId, response = {}) {
     }
     spindle.sendToFrontend({ type: "state", state, ...response }, userId);
   });
+}
+function pushStateInBackground(userId) {
+  pushState(userId).catch((error) => {
+    spindle.log.warn(`SceneMap state refresh failed: ${error.message}`);
+  });
+}
+function sendGenerationStatus(userId, cancelling = false) {
+  const generation = activeGenerations.get(userId);
+  spindle.sendToFrontend({
+    type: "generation_status",
+    active: generation !== null,
+    messageId: generation?.messageId ?? null,
+    cancelling: generation !== null && cancelling
+  }, userId);
 }
 async function resolveSceneMapMacro(context) {
   const chatId = context.env?.chat?.id;
@@ -2396,22 +2448,16 @@ async function generateTracker(userId, expectedLatestMessageId) {
     throw new Error("SceneMap needs a user context before generating a tracker.");
   const activeGeneration = activeGenerations.get(userId);
   if (activeGeneration) {
-    if (expectedLatestMessageId) {
-      await pushState(userId);
-      return;
-    }
-    activeGenerations.cancel(activeGeneration);
-    await pushState(userId);
-    spindle.toast.info("SceneMap generation cancellation requested.", { userId });
+    sendGenerationStatus(userId);
+    pushStateInBackground(userId);
     return;
   }
   const controller = new AbortController;
   const generation = activeGenerations.start(userId, controller);
+  sendGenerationStatus(userId);
   try {
-    await pushState(userId);
     throwIfGenerationCancelled(controller.signal);
-    const { chat, messages } = await getActiveContext(userId);
-    throwIfGenerationCancelled(controller.signal);
+    const { chat, messages } = await raceWithAbort(getActiveContext(userId), controller.signal);
     if (!chat)
       throw new Error("Open a chat before generating a SceneMap tracker.");
     const target = findLatestAssistantMessage(messages);
@@ -2420,12 +2466,12 @@ async function generateTracker(userId, expectedLatestMessageId) {
     if (expectedLatestMessageId && target.id !== expectedLatestMessageId)
       return;
     activeGenerations.setMessageId(generation, target.id);
+    sendGenerationStatus(userId);
     const targetSwipeId = getActiveSwipeId(target);
     const targetSwipeSnapshot = captureSwipeSnapshot(target, targetSwipeId);
     if (!targetSwipeSnapshot)
       throw new Error("SceneMap could not read the target swipe.");
-    const settings = await loadSettings(userId);
-    throwIfGenerationCancelled(controller.signal);
+    const settings = await raceWithAbort(loadSettings(userId), controller.signal);
     const presetKey = getChatPresetKey(chat, settings);
     const preset = settings.schemaPresets[presetKey] ?? settings.schemaPresets[settings.schemaPreset] ?? settings.schemaPresets.default;
     validateSchemaDefinition(preset.value);
@@ -2447,15 +2493,12 @@ ${exampleResponse}
     });
     const characterId = resolveMessageCharacterId(chat, target);
     const context = { chatId: chat.id, characterId, userId };
-    const promptMessages = await resolvePromptMessages(trimMessagesForPrompt(messages, target.id, settings.includeLastXMessages), context);
-    throwIfGenerationCancelled(controller.signal);
-    const referenceMessages = await buildReferencePromptMessages(chat, userId, characterId);
-    throwIfGenerationCancelled(controller.signal);
+    const promptMessages = await raceWithAbort(resolvePromptMessages(trimMessagesForPrompt(messages, target.id, settings.includeLastXMessages), context), controller.signal);
+    const referenceMessages = await raceWithAbort(buildReferencePromptMessages(chat, userId, characterId), controller.signal);
     promptMessages.unshift(...referenceMessages);
     promptMessages.push({ role: "user", content: wrapInstructions(finalPrompt) });
-    await pushState(userId);
     spindle.toast.info("Mapping this scene...", { title: "SceneMap", userId });
-    const result = await generateQuiet({
+    const result = await raceWithAbort(generateQuiet({
       messages: promptMessages,
       connection_id: settings.connectionId || undefined,
       userId,
@@ -2465,21 +2508,22 @@ ${exampleResponse}
         top_p: resolveSamplingParameter(settings.topP, 0, 1)
       },
       signal: controller.signal
-    });
+    }), controller.signal);
+    throwIfGenerationCancelled(controller.signal);
     const parsed = parseAndValidateModelJson(result.content, preset.value);
-    const currentMessages = await spindle.chat.getMessages(chat.id);
+    const currentMessages = await raceWithAbort(spindle.chat.getMessages(chat.id), controller.signal);
     const currentTarget = currentMessages.find((message) => message.id === target.id);
     if (!currentTarget)
       throw new Error("SceneMap target message was deleted during generation.");
     if (!swipeSnapshotMatches(targetSwipeSnapshot, currentTarget, targetSwipeId)) {
       throw new Error("SceneMap target swipe changed during generation. Generate the tracker again.");
     }
-    await spindle.chat.updateMessage(chat.id, target.id, {
+    await raceWithAbort(spindle.chat.updateMessage(chat.id, target.id, {
       metadata: mergeTrackerMetadata(currentTarget.metadata, parsed, targetSwipeId, {
         presetKey,
         schemaHash: currentSchemaHash
       })
-    });
+    }), controller.signal);
     spindle.toast.success("Tracker updated.", { title: "SceneMap", userId });
   } catch (error) {
     if (error.name !== "AbortError") {
@@ -2487,8 +2531,20 @@ ${exampleResponse}
     }
   } finally {
     activeGenerations.finish(generation);
-    await pushState(userId);
+    sendGenerationStatus(userId);
+    pushStateInBackground(userId);
   }
+}
+function cancelTrackerGeneration(userId) {
+  const generation = activeGenerations.get(userId);
+  if (!generation) {
+    sendGenerationStatus(userId);
+    pushStateInBackground(userId);
+    return;
+  }
+  activeGenerations.cancel(generation);
+  sendGenerationStatus(userId, true);
+  spindle.toast.info("SceneMap generation cancellation requested.", { userId });
 }
 async function maybeAutoGenerateTracker(messageId, userId) {
   const settings = await loadSettings(userId);
@@ -2623,6 +2679,9 @@ spindle.onFrontendMessage(async (payload, userId) => {
       }
       case "generate_tracker":
         await generateTracker(userId);
+        break;
+      case "cancel_generation":
+        cancelTrackerGeneration(userId);
         break;
       case "edit_tracker":
         await editTracker(payload.chatId, payload.messageId, payload.swipeId, payload.data, userId);

@@ -21,6 +21,7 @@ import {
 import { SettingsDraftTracker } from "./settings-draft";
 import { AutomaticSettingsDraftTracker } from "./automatic-settings-draft";
 import { validateSchemaDefinition } from "./schema-validator";
+import { getGenerationButtonCommand } from "./generation-action";
 
 let state: SceneMapState = {
   settings: defaultSettings,
@@ -50,6 +51,7 @@ let dockPanelError: string | null = null;
 let settingsRuntimeError: string | null = null;
 let trackerRuntimeError: string | null = null;
 let isGenerationRequestPending = false;
+let generationRequestWatchdog: ReturnType<typeof setTimeout> | null = null;
 let editorRequestSeq = 0;
 let settingsSaveRequestSeq = 0;
 let automaticSaveRequestSeq = 0;
@@ -88,6 +90,7 @@ type PendingTextEditor = {
 const pendingTextEditors = new Map<string, PendingTextEditor>();
 const settingsDraft = new SettingsDraftTracker();
 const automaticSettingsDraft = new AutomaticSettingsDraftTracker<SceneMapSettings>();
+const GENERATION_REQUEST_TIMEOUT_MS = 10_000;
 
 const iconSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l-6 3V6l6-3 6 3 6-3v15l-6 3-6-3z"/><path d="M9 3v15"/><path d="M15 6v15"/></svg>`;
 
@@ -106,6 +109,7 @@ export function setup(ctx: SpindleFrontendContext) {
   dockPanelHeight = readStoredDockPanelSize("height", 380);
   settingsRuntimeError = null;
   trackerRuntimeError = null;
+  clearGenerationRequestPending();
   ctxRef = ctx;
   const removeStyle = ctx.dom.addStyle(styles);
   const tab = ctx.ui.registerDrawerTab({
@@ -136,7 +140,6 @@ export function setup(ctx: SpindleFrontendContext) {
       // focused. Reconcile drafts first, then avoid rebuilding an unchanged form.
       const preserveActiveSettings = settingsSurfaceHasActiveInteraction();
       const previousState = state;
-      isGenerationRequestPending = false;
       const incomingState = payload.state as SceneMapState;
       hasReceivedInitialState = true;
       if (!settingsDraft.initialized) settingsDraft.initialize(presetSettingsFingerprint(incomingState.settings));
@@ -164,11 +167,23 @@ export function setup(ctx: SpindleFrontendContext) {
       });
       return;
     }
+    if (payload?.type === "generation_status") {
+      clearGenerationRequestPending();
+      const active = payload.active === true;
+      state = {
+        ...state,
+        generationActive: active,
+        generatingMessageId: active && typeof payload.messageId === "string" ? payload.messageId : null,
+      };
+      renderTrackerSurfaces();
+      renderChatToolbar();
+      return;
+    }
     if (payload?.type === "error") {
-      isGenerationRequestPending = false;
       const saveFailed = typeof payload.requestId === "string" && settingsDraft.fail(payload.requestId);
       const automaticSaveFailed = typeof payload.requestId === "string" && automaticSettingsDraft.fail(payload.requestId);
       const pendingEditor = typeof payload.requestId === "string" ? takePendingTextEditor(payload.requestId) : null;
+      if (!saveFailed && !automaticSaveFailed && !pendingEditor) clearGenerationRequestPending();
       syncSettingsDraftUi();
       renderChatToolbar();
       if (saveFailed || automaticSaveFailed) {
@@ -229,7 +244,7 @@ export function setup(ctx: SpindleFrontendContext) {
     appliedTrackerPlacement = null;
     hasReceivedInitialState = false;
     drawerView = "settings";
-    isGenerationRequestPending = false;
+    clearGenerationRequestPending();
     settingsRuntimeError = null;
     trackerRuntimeError = null;
     settingsDraft.reset();
@@ -421,6 +436,28 @@ function requestState() {
   send({ type: "get_state" });
 }
 
+function clearGenerationRequestPending() {
+  isGenerationRequestPending = false;
+  if (generationRequestWatchdog) clearTimeout(generationRequestWatchdog);
+  generationRequestWatchdog = null;
+}
+
+function beginGenerationRequest() {
+  isGenerationRequestPending = true;
+  if (generationRequestWatchdog) clearTimeout(generationRequestWatchdog);
+  generationRequestWatchdog = setTimeout(() => {
+    generationRequestWatchdog = null;
+    if (!isGenerationRequestPending) return;
+    // Keep the pending flag as a conservative "may be active" state. The
+    // button remains an enabled Cancel action even if the acknowledgement was
+    // lost, and an explicit cancel will reset an idle backend as well.
+    trackerRuntimeError = "SceneMap did not receive a generation response. Use Cancel to safely reset it.";
+    renderTrackerSurfaces();
+    renderChatToolbar();
+    requestState();
+  }, GENERATION_REQUEST_TIMEOUT_MS);
+}
+
 function settingsSurfaceHasActiveInteraction(): boolean {
   if (!rootRef) return false;
   const settingsVisible = mergeSettings(state.settings).trackerPlacement === "dock" || drawerView === "settings";
@@ -471,7 +508,7 @@ function renderChatToolbar() {
       data-action="generate"
       title="${escapeAttr(label)}"
       aria-label="${escapeAttr(label)}"
-      ${state.activeMessageId && !isGenerationRequestPending ? "" : "disabled"}
+      ${state.activeMessageId ? "" : "disabled"}
     >
       ${isGenerating ? refreshSvg() : iconSvg}
     </button>
@@ -551,7 +588,7 @@ function trackerPanelMarkup(): string {
   return `
     <div class="scenemap-shell">
       <header class="scenemap-header">
-        <button class="scenemap-pill-action scenemap-tracker-action scenemap-primary" data-action="generate" ${state.activeMessageId && !isGenerationRequestPending ? "" : "disabled"}>
+        <button class="scenemap-pill-action scenemap-tracker-action scenemap-primary" data-action="generate" ${state.activeMessageId ? "" : "disabled"}>
           ${state.generationActive || isGenerationRequestPending ? "Cancel" : latest ? "Regenerate" : "Generate"}
         </button>
         <button class="scenemap-pill-action scenemap-tracker-action" data-action="edit" ${latest?.schemaMatchesCurrent ? "" : "disabled"}>Edit</button>
@@ -896,12 +933,12 @@ function handleClick(event: Event) {
     if (editor === "schema" || editor === "prompt") openPresetExpandedEditor(editor);
   }
   if (action === "generate") {
-    if (isGenerationRequestPending) return;
+    const command = getGenerationButtonCommand(state.generationActive, isGenerationRequestPending);
     clearTrackerRuntimeError();
-    isGenerationRequestPending = true;
+    beginGenerationRequest();
     renderTrackerSurfaces();
     renderChatToolbar();
-    send({ type: "generate_tracker" });
+    send({ type: command });
   }
   if (action === "edit" && state.latest?.schemaMatchesCurrent && state.chatId) {
     clearTrackerRuntimeError();
