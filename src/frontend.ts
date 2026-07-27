@@ -46,7 +46,6 @@ let dockResizeObserver: MutationObserver | null = null;
 let dockPanelWidth = 380;
 let dockPanelHeight = 380;
 const decoratedDockResizeHandles = new Set<HTMLElement>();
-let dockPanelCreatedAt = 0;
 let dockPanelError: string | null = null;
 let settingsRuntimeError: string | null = null;
 let trackerRuntimeError: string | null = null;
@@ -191,13 +190,9 @@ export function setup(ctx: SpindleFrontendContext) {
     ctx.events.on("MESSAGE_DELETED", () => requestState()),
     ctx.events.on("MESSAGE_SWIPED", () => requestState()),
     ctx.events.on("SWIPE_EDITED", () => requestState()),
-    ctx.events.on("GENERATION_ENDED", (payload: any) => {
-      if (state.settings.autoGenerateAiTrackers && payload?.messageId && !payload?.error) {
-        send({ type: "maybe_auto_generate", messageId: payload.messageId });
-        return;
-      }
-      requestState();
-    }),
+    // Auto-generation is handled by the backend event subscription, which
+    // receives the triggering userId directly from Spindle.
+    ctx.events.on("GENERATION_ENDED", () => requestState()),
   ];
 
   rootRef.addEventListener("click", handleClick);
@@ -247,9 +242,9 @@ export function setup(ctx: SpindleFrontendContext) {
 function ensureDockPanel() {
   const ctx = ctxRef;
   if (!ctx || mergeSettings(state.settings).trackerPlacement !== "dock") return;
-  // Lumiverse connects a requested panel asynchronously. The grace period avoids
-  // destroying and recreating a valid panel during that short detached phase.
-  if (dockRootRef && dockPanelHandle && (dockRootRef.isConnected || Date.now() - dockPanelCreatedAt < 1000)) return;
+  // A registered Spindle root may be temporarily detached while its panel is
+  // collapsed or inactive. The handle, not root.isConnected, owns its lifetime.
+  if (dockRootRef && dockPanelHandle) return;
   dockRootRef?.removeEventListener("click", handleClick);
   cleanupDockResizeHandles();
   dockPanelHandle?.destroy();
@@ -271,7 +266,6 @@ function ensureDockPanel() {
     return;
   }
   dockPanelHandle = panel;
-  dockPanelCreatedAt = Date.now();
   dockPanelError = null;
   dockRootRef = panel.root;
   dockRootRef.classList.add("scenemap-lv", "scenemap-dock-root");
@@ -288,7 +282,6 @@ function destroyDockPanel() {
   dockRootRef = null;
   dockPanelHandle = null;
   dockResizeObserver = null;
-  dockPanelCreatedAt = 0;
   dockPanelError = null;
 }
 
@@ -1347,11 +1340,8 @@ function exportPreset() {
 }
 
 async function importPreset() {
-  const ctx = ctxRef as (SpindleFrontendContext & { uploads?: { pickFile?: (options: Record<string, unknown>) => Promise<Array<{ name: string; bytes: Uint8Array }>> } }) | null;
-  if (!ctx?.uploads?.pickFile) {
-    showSettingsError("File import is not available in this Lumiverse build.");
-    return;
-  }
+  const ctx = ctxRef;
+  if (!ctx) return;
   try {
     const files = await ctx.uploads.pickFile({
       accept: [".json", "application/json"],

@@ -3718,7 +3718,6 @@ var dockResizeObserver = null;
 var dockPanelWidth = 380;
 var dockPanelHeight = 380;
 var decoratedDockResizeHandles = new Set;
-var dockPanelCreatedAt = 0;
 var dockPanelError = null;
 var settingsRuntimeError = null;
 var trackerRuntimeError = null;
@@ -3837,13 +3836,7 @@ function setup(ctx) {
     ctx.events.on("MESSAGE_DELETED", () => requestState()),
     ctx.events.on("MESSAGE_SWIPED", () => requestState()),
     ctx.events.on("SWIPE_EDITED", () => requestState()),
-    ctx.events.on("GENERATION_ENDED", (payload) => {
-      if (state.settings.autoGenerateAiTrackers && payload?.messageId && !payload?.error) {
-        send({ type: "maybe_auto_generate", messageId: payload.messageId });
-        return;
-      }
-      requestState();
-    })
+    ctx.events.on("GENERATION_ENDED", () => requestState())
   ];
   rootRef.addEventListener("click", handleClick);
   rootRef.addEventListener("change", handleChange);
@@ -3893,7 +3886,7 @@ function ensureDockPanel() {
   const ctx = ctxRef;
   if (!ctx || mergeSettings(state.settings).trackerPlacement !== "dock")
     return;
-  if (dockRootRef && dockPanelHandle && (dockRootRef.isConnected || Date.now() - dockPanelCreatedAt < 1000))
+  if (dockRootRef && dockPanelHandle)
     return;
   dockRootRef?.removeEventListener("click", handleClick);
   cleanupDockResizeHandles();
@@ -3916,7 +3909,6 @@ function ensureDockPanel() {
     return;
   }
   dockPanelHandle = panel;
-  dockPanelCreatedAt = Date.now();
   dockPanelError = null;
   dockRootRef = panel.root;
   dockRootRef.classList.add("scenemap-lv", "scenemap-dock-root");
@@ -3932,7 +3924,6 @@ function destroyDockPanel() {
   dockRootRef = null;
   dockPanelHandle = null;
   dockResizeObserver = null;
-  dockPanelCreatedAt = 0;
   dockPanelError = null;
 }
 function syncTrackerPlacement() {
@@ -4911,10 +4902,8 @@ function exportPreset() {
 }
 async function importPreset() {
   const ctx = ctxRef;
-  if (!ctx?.uploads?.pickFile) {
-    showSettingsError("File import is not available in this Lumiverse build.");
+  if (!ctx)
     return;
-  }
   try {
     const files = await ctx.uploads.pickFile({
       accept: [".json", "application/json"],

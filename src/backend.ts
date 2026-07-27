@@ -28,6 +28,11 @@ import { KeyedAsyncQueue } from "./keyed-async-queue";
 import { captureSwipeSnapshot, swipeSnapshotMatches } from "./swipe-snapshot";
 import { resolveMessageCharacterId } from "./group-character-context";
 import { getPreviousTrackerJson, type StoredTracker } from "./tracker-history";
+import type {
+  GenerationEndedPayloadDTO,
+  GenerationRequestDTO,
+  GenerationResponseDTO,
+} from "lumiverse-spindle-types";
 
 declare const spindle: import("lumiverse-spindle-types").SpindleAPI;
 
@@ -135,6 +140,26 @@ function throwIfGenerationCancelled(signal: AbortSignal): void {
   const error = new Error("SceneMap generation was cancelled.");
   error.name = "AbortError";
   throw error;
+}
+
+function isGenerationResponse(value: unknown): value is GenerationResponseDTO {
+  return Boolean(
+    value
+    && typeof value === "object"
+    && typeof (value as { content?: unknown }).content === "string",
+  );
+}
+
+async function generateQuiet(
+  input: Omit<GenerationRequestDTO, "type">,
+): Promise<GenerationResponseDTO> {
+  // quiet() supplies the discriminator at runtime, but the public request DTO
+  // still requires it and currently exposes the response as unknown.
+  const result = await spindle.generate.quiet({ ...input, type: "quiet" });
+  if (!isGenerationResponse(result)) {
+    throw new Error("Lumiverse returned an invalid response for SceneMap generation.");
+  }
+  return result;
 }
 
 function getTrackerStore(message: ChatMessage | null | undefined): Record<string, unknown> | null {
@@ -672,7 +697,7 @@ async function generateTracker(userId?: string, expectedLatestMessageId?: string
     await pushState(userId);
     spindle.toast.info("Mapping this scene...", { title: "SceneMap", userId });
 
-    const result = await (spindle.generate.quiet as any)({
+    const result = await generateQuiet({
       messages: promptMessages,
       connection_id: settings.connectionId || undefined,
       userId,
@@ -842,9 +867,6 @@ spindle.onFrontendMessage(async (payload: any, userId?: string) => {
       case "generate_tracker":
         await generateTracker(userId);
         break;
-      case "maybe_auto_generate":
-        await maybeAutoGenerateTracker(payload.messageId ?? null, userId);
-        break;
       case "edit_tracker":
         await editTracker(payload.chatId, payload.messageId, payload.swipeId, payload.data, userId);
         break;
@@ -852,7 +874,7 @@ spindle.onFrontendMessage(async (payload: any, userId?: string) => {
         await deleteTracker(payload.messageId, userId);
         break;
       case "open_text_editor": {
-        const result = await (spindle.textEditor as any).open({
+        const result = await spindle.textEditor.open({
           title: typeof payload.title === "string" ? payload.title : "Edit Text",
           value: typeof payload.value === "string" ? payload.value : "",
           placeholder: typeof payload.placeholder === "string" ? payload.placeholder : "",
@@ -861,14 +883,14 @@ spindle.onFrontendMessage(async (payload: any, userId?: string) => {
         spindle.sendToFrontend({
           type: "text_editor_result",
           requestId: payload.requestId,
-          text: result?.text ?? "",
-          cancelled: result?.cancelled === true,
+          text: result.text,
+          cancelled: result.cancelled,
         }, userId);
         break;
       }
     }
   } catch (error) {
-    const isGenerationRequest = payload?.type === "generate_tracker" || payload?.type === "maybe_auto_generate";
+    const isGenerationRequest = payload?.type === "generate_tracker";
     spindle.sendToFrontend({
       type: "error",
       message: (error as Error).message,
@@ -882,13 +904,22 @@ spindle.onFrontendMessage(async (payload: any, userId?: string) => {
   }
 });
 
-spindle.on("CHAT_SWITCHED", () => {});
-spindle.on("MESSAGE_EDITED", () => {});
-spindle.on("MESSAGE_DELETED", () => {});
-spindle.on("MESSAGE_SWIPED", () => {});
-spindle.on("GENERATION_ENDED", (payload: any) => {
-  if (payload?.error || !payload?.messageId) return;
-  spindle.log.warn("SceneMap auto-generation skipped: generation event does not include a frontend user context.");
+spindle.on("GENERATION_ENDED", (payload: GenerationEndedPayloadDTO, userId?: string) => {
+  if (payload.error || !payload.messageId) return;
+  if (!userId) {
+    spindle.log.warn("SceneMap auto-generation skipped: generation event did not include a user context.");
+    return;
+  }
+  void maybeAutoGenerateTracker(payload.messageId, userId).catch((error) => {
+    const message = (error as Error).message;
+    spindle.log.error(`SceneMap auto-generation failed: ${message}`);
+    spindle.sendToFrontend({ type: "error", message }, userId);
+    spindle.toast.error(message, {
+      title: "SceneMap generation failed",
+      duration: 10000,
+      userId,
+    });
+  });
 });
 
 spindle.log.info("SceneMap loaded.");

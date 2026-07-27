@@ -1978,6 +1978,16 @@ function throwIfGenerationCancelled(signal) {
   error.name = "AbortError";
   throw error;
 }
+function isGenerationResponse(value) {
+  return Boolean(value && typeof value === "object" && typeof value.content === "string");
+}
+async function generateQuiet(input) {
+  const result = await spindle.generate.quiet({ ...input, type: "quiet" });
+  if (!isGenerationResponse(result)) {
+    throw new Error("Lumiverse returned an invalid response for SceneMap generation.");
+  }
+  return result;
+}
 function getTrackerStore2(message) {
   const data = message?.metadata?.[MESSAGE_METADATA_KEY];
   if (!data || typeof data !== "object")
@@ -2445,7 +2455,7 @@ ${exampleResponse}
     promptMessages.push({ role: "user", content: wrapInstructions(finalPrompt) });
     await pushState(userId);
     spindle.toast.info("Mapping this scene...", { title: "SceneMap", userId });
-    const result = await spindle.generate.quiet({
+    const result = await generateQuiet({
       messages: promptMessages,
       connection_id: settings.connectionId || undefined,
       userId,
@@ -2614,9 +2624,6 @@ spindle.onFrontendMessage(async (payload, userId) => {
       case "generate_tracker":
         await generateTracker(userId);
         break;
-      case "maybe_auto_generate":
-        await maybeAutoGenerateTracker(payload.messageId ?? null, userId);
-        break;
       case "edit_tracker":
         await editTracker(payload.chatId, payload.messageId, payload.swipeId, payload.data, userId);
         break;
@@ -2633,14 +2640,14 @@ spindle.onFrontendMessage(async (payload, userId) => {
         spindle.sendToFrontend({
           type: "text_editor_result",
           requestId: payload.requestId,
-          text: result?.text ?? "",
-          cancelled: result?.cancelled === true
+          text: result.text,
+          cancelled: result.cancelled
         }, userId);
         break;
       }
     }
   } catch (error) {
-    const isGenerationRequest = payload?.type === "generate_tracker" || payload?.type === "maybe_auto_generate";
+    const isGenerationRequest = payload?.type === "generate_tracker";
     spindle.sendToFrontend({
       type: "error",
       message: error.message,
@@ -2653,13 +2660,22 @@ spindle.onFrontendMessage(async (payload, userId) => {
     });
   }
 });
-spindle.on("CHAT_SWITCHED", () => {});
-spindle.on("MESSAGE_EDITED", () => {});
-spindle.on("MESSAGE_DELETED", () => {});
-spindle.on("MESSAGE_SWIPED", () => {});
-spindle.on("GENERATION_ENDED", (payload) => {
-  if (payload?.error || !payload?.messageId)
+spindle.on("GENERATION_ENDED", (payload, userId) => {
+  if (payload.error || !payload.messageId)
     return;
-  spindle.log.warn("SceneMap auto-generation skipped: generation event does not include a frontend user context.");
+  if (!userId) {
+    spindle.log.warn("SceneMap auto-generation skipped: generation event did not include a user context.");
+    return;
+  }
+  maybeAutoGenerateTracker(payload.messageId, userId).catch((error) => {
+    const message = error.message;
+    spindle.log.error(`SceneMap auto-generation failed: ${message}`);
+    spindle.sendToFrontend({ type: "error", message }, userId);
+    spindle.toast.error(message, {
+      title: "SceneMap generation failed",
+      duration: 1e4,
+      userId
+    });
+  });
 });
 spindle.log.info("SceneMap loaded.");
