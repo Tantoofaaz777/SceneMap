@@ -245,6 +245,20 @@ function resolveSamplingParameter(value, minimum, maximum, fallback = 1) {
   const resolved = typeof value === "number" && Number.isFinite(value) ? value : fallback;
   return Math.min(maximum, Math.max(minimum, resolved));
 }
+function jsonValuesEqual(left, right) {
+  if (Object.is(left, right))
+    return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((value, index) => jsonValuesEqual(value, right[index]));
+  }
+  if (!left || !right || typeof left !== "object" || typeof right !== "object")
+    return false;
+  const leftRecord = left;
+  const rightRecord = right;
+  const leftKeys = Object.keys(leftRecord);
+  const rightKeys = Object.keys(rightRecord);
+  return leftKeys.length === rightKeys.length && leftKeys.every((key) => Object.prototype.hasOwnProperty.call(rightRecord, key) && jsonValuesEqual(leftRecord[key], rightRecord[key]));
+}
 function schemaFingerprint(schema) {
   const text = stableJsonStringify(schema);
   let hash = 2166136261;
@@ -2042,6 +2056,247 @@ function scopeKey(userId, chatId) {
   return JSON.stringify([userId, chatId]);
 }
 
+// src/partial-regeneration.ts
+var forbiddenPathSegments = new Set(["__proto__", "prototype", "constructor"]);
+var MAX_SELECTED_FIELDS = 50;
+var MAX_PATH_DEPTH = 16;
+function collectRegeneratableFields(value) {
+  const fields = [];
+  collectFields(value, [], [], "", fields);
+  return fields;
+}
+function normalizeTrackerPaths(value) {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error("Select at least one tracker field to regenerate.");
+  }
+  if (value.length > MAX_SELECTED_FIELDS) {
+    throw new Error(`You can regenerate at most ${MAX_SELECTED_FIELDS} fields at once.`);
+  }
+  const paths = value.map((candidate, pathIndex) => {
+    if (!Array.isArray(candidate) || candidate.length === 0 || candidate.length > MAX_PATH_DEPTH) {
+      throw new Error(`Selected tracker field ${pathIndex + 1} has an invalid path.`);
+    }
+    return candidate.map((segment) => {
+      if (typeof segment === "number") {
+        if (!Number.isSafeInteger(segment) || segment < 0) {
+          throw new Error("Tracker array indexes must be non-negative integers.");
+        }
+        return segment;
+      }
+      if (typeof segment !== "string" || segment.length === 0 || segment.length > 128 || forbiddenPathSegments.has(segment)) {
+        throw new Error("A selected tracker field contains an unsafe path segment.");
+      }
+      return segment;
+    });
+  });
+  const keys = new Set;
+  for (const path of paths) {
+    const key = trackerPathKey(path);
+    if (keys.has(key))
+      throw new Error("The same tracker field was selected more than once.");
+    keys.add(key);
+  }
+  for (let left = 0;left < paths.length; left += 1) {
+    for (let right = left + 1;right < paths.length; right += 1) {
+      if (isPathPrefix(paths[left], paths[right]) || isPathPrefix(paths[right], paths[left])) {
+        throw new Error("Select either a tracker field or one of its children, not both.");
+      }
+    }
+  }
+  return paths;
+}
+function trackerPathKey(path) {
+  return JSON.stringify(path);
+}
+function formatTrackerPath(path, tracker) {
+  const labels = [];
+  let current = tracker;
+  for (const segment of path) {
+    if (typeof segment === "number") {
+      const record = getRecord(Array.isArray(current) ? current[segment] : null);
+      const name = compactLabel(record?.name);
+      labels.push(name || `Item ${segment + 1}`);
+      current = Array.isArray(current) ? current[segment] : undefined;
+      continue;
+    }
+    labels.push(humanizeTrackerKey(segment));
+    current = getChild(current, segment);
+  }
+  return labels.join(" \u203A ");
+}
+function applyTrackerFieldUpdates(tracker, updates) {
+  if (!getRecord(tracker))
+    throw new Error("The existing tracker must be a JSON object.");
+  const clone = cloneJsonValue(tracker);
+  for (const update of updates)
+    setExistingTrackerValue(clone, update.path, cloneJsonValue(update.value));
+  return clone;
+}
+function getTrackerSubschema(rootSchema, path) {
+  let schema = rootSchema;
+  for (const segment of path) {
+    schema = deriveChildSchema(schema, segment, rootSchema, new Set);
+    if (schema === null)
+      return null;
+  }
+  return materializeSchema(schema, rootSchema, new Set);
+}
+function collectFields(value, path, groups, label, fields) {
+  const record = getRecord(value);
+  if (record && Object.keys(record).length > 0) {
+    const nextGroups = label ? [...groups, label] : groups;
+    for (const [key, child] of Object.entries(record)) {
+      collectFields(child, [...path, key], nextGroups, humanizeTrackerKey(key), fields);
+    }
+    return;
+  }
+  if (Array.isArray(value) && value.length > 0 && value.every((item) => getRecord(item) !== null)) {
+    const nextGroups = label ? [...groups, label] : groups;
+    value.forEach((item, index) => {
+      const name = compactLabel(getRecord(item)?.name) || `Item ${index + 1}`;
+      collectFields(item, [...path, index], [...nextGroups, name], "", fields);
+    });
+    return;
+  }
+  if (path.length === 0)
+    return;
+  fields.push({
+    path,
+    label: label || humanizeTrackerKey(String(path.at(-1) ?? "Field")),
+    groups,
+    currentValue: value
+  });
+}
+function deriveChildSchema(schema, segment, rootSchema, seenRefs) {
+  if (schema === true)
+    return {};
+  if (schema === false || !getRecord(schema))
+    return null;
+  const record = schema;
+  const candidates = [];
+  if (typeof record.$ref === "string" && record.$ref.startsWith("#/") && !seenRefs.has(record.$ref)) {
+    const resolved = resolveLocalSchemaRef2(rootSchema, record.$ref);
+    if (resolved !== null) {
+      candidates.push(deriveChildSchema(resolved, segment, rootSchema, new Set([...seenRefs, record.$ref])));
+    }
+  }
+  if (typeof segment === "string") {
+    const properties = getRecord(record.properties);
+    if (properties && Object.prototype.hasOwnProperty.call(properties, segment)) {
+      candidates.push(properties[segment]);
+    } else if (getRecord(record.additionalProperties)) {
+      candidates.push(record.additionalProperties);
+    } else if (record.additionalProperties === true) {
+      candidates.push({});
+    }
+  } else if (Array.isArray(record.items)) {
+    if (record.items[segment] !== undefined)
+      candidates.push(record.items[segment]);
+    else if (record.additionalItems !== false)
+      candidates.push(record.additionalItems === undefined ? {} : record.additionalItems);
+  } else if (record.items !== undefined) {
+    candidates.push(record.items);
+  } else if (Array.isArray(record.prefixItems)) {
+    if (record.prefixItems[segment] !== undefined)
+      candidates.push(record.prefixItems[segment]);
+    else if (record.items !== false)
+      candidates.push(record.items === undefined ? {} : record.items);
+  }
+  for (const keyword of ["allOf", "anyOf", "oneOf"]) {
+    if (!Array.isArray(record[keyword]))
+      continue;
+    const children = record[keyword].map((child) => deriveChildSchema(child, segment, rootSchema, new Set(seenRefs))).filter((child) => child !== null);
+    if (children.length === 1)
+      candidates.push(children[0]);
+    else if (children.length > 1)
+      candidates.push({ [keyword]: children });
+  }
+  const valid = candidates.filter((candidate) => candidate !== null);
+  if (valid.length === 0)
+    return null;
+  if (valid.length === 1)
+    return valid[0];
+  return { allOf: valid };
+}
+function materializeSchema(schema, rootSchema, seenRefs) {
+  if (typeof schema === "boolean" || !schema || typeof schema !== "object")
+    return schema;
+  if (Array.isArray(schema))
+    return schema.map((item) => materializeSchema(item, rootSchema, seenRefs));
+  const record = schema;
+  if (typeof record.$ref === "string" && record.$ref.startsWith("#/")) {
+    if (seenRefs.has(record.$ref))
+      return {};
+    const resolved = resolveLocalSchemaRef2(rootSchema, record.$ref);
+    if (resolved !== null) {
+      const resolvedSchema = materializeSchema(resolved, rootSchema, new Set([...seenRefs, record.$ref]));
+      const siblings = Object.fromEntries(Object.entries(record).filter(([key]) => key !== "$ref").map(([key, child]) => [key, materializeSchema(child, rootSchema, seenRefs)]));
+      return Object.keys(siblings).length > 0 ? { allOf: [resolvedSchema, siblings] } : resolvedSchema;
+    }
+  }
+  return Object.fromEntries(Object.entries(record).map(([key, child]) => [key, materializeSchema(child, rootSchema, seenRefs)]));
+}
+function resolveLocalSchemaRef2(rootSchema, reference) {
+  let current = rootSchema;
+  for (const token of reference.slice(2).split("/")) {
+    const key = token.replaceAll("~1", "/").replaceAll("~0", "~");
+    if (!current || typeof current !== "object" || Array.isArray(current))
+      return null;
+    if (!Object.prototype.hasOwnProperty.call(current, key))
+      return null;
+    current = current[key];
+  }
+  return current;
+}
+function setExistingTrackerValue(root, path, nextValue) {
+  if (path.length === 0)
+    throw new Error("A partial update cannot replace the entire tracker.");
+  let parent = root;
+  for (const segment of path.slice(0, -1)) {
+    if (!hasChild(parent, segment))
+      throw new Error("A selected tracker field no longer exists.");
+    parent = getChild(parent, segment);
+  }
+  const last = path[path.length - 1];
+  if (!hasChild(parent, last))
+    throw new Error("A selected tracker field no longer exists.");
+  if (Array.isArray(parent) && typeof last === "number")
+    parent[last] = nextValue;
+  else
+    parent[last] = nextValue;
+}
+function hasChild(parent, segment) {
+  if (Array.isArray(parent)) {
+    return typeof segment === "number" && segment < parent.length;
+  }
+  return typeof segment === "string" && getRecord(parent) !== null && Object.prototype.hasOwnProperty.call(parent, segment);
+}
+function getChild(parent, segment) {
+  if (Array.isArray(parent) && typeof segment === "number")
+    return parent[segment];
+  if (typeof segment === "string" && getRecord(parent))
+    return parent[segment];
+  return;
+}
+function cloneJsonValue(value) {
+  if (Array.isArray(value))
+    return value.map(cloneJsonValue);
+  const record = getRecord(value);
+  if (record) {
+    return Object.fromEntries(Object.entries(record).map(([key, child]) => [key, cloneJsonValue(child)]));
+  }
+  return value;
+}
+function getRecord(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+function compactLabel(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+function isPathPrefix(left, right) {
+  return left.length < right.length && left.every((segment, index) => segment === right[index]);
+}
+
 // src/backend.ts
 var activeGenerations = new GenerationRegistry;
 var worldInfoActivations = new WorldInfoActivationCache;
@@ -2339,7 +2594,7 @@ async function buildActiveWorldInfo(chatId, userId, targetMessageId) {
 }
 function resolveCharacterAlternateFields(character, chat) {
   const selections = getCharacterAlternateFieldSelections(character, chat);
-  const alternateFields = getRecord(character.extensions?.alternate_fields);
+  const alternateFields = getRecord2(character.extensions?.alternate_fields);
   if (!selections || !alternateFields)
     return character;
   const overrides = {};
@@ -2351,10 +2606,10 @@ function resolveCharacterAlternateFields(character, chat) {
     if (!Array.isArray(variants))
       continue;
     const variant = variants.find((item) => {
-      const record = getRecord(item);
+      const record = getRecord2(item);
       return record ? compactText(record.id) === variantId : false;
     });
-    const content = compactText(getRecord(variant)?.content);
+    const content = compactText(getRecord2(variant)?.content);
     if (content)
       overrides[field] = content;
   }
@@ -2365,15 +2620,15 @@ function getCharacterAlternateFieldSelections(character, chat) {
   if (!metadata)
     return null;
   if (metadata.group === true) {
-    const byCharacter = getRecord(metadata.group_alternate_field_selections);
+    const byCharacter = getRecord2(metadata.group_alternate_field_selections);
     const characterId = compactText(character.id);
-    const groupSelections = characterId ? getRecord(byCharacter?.[characterId]) : null;
+    const groupSelections = characterId ? getRecord2(byCharacter?.[characterId]) : null;
     if (groupSelections)
       return groupSelections;
     if (chat.character_id && characterId && chat.character_id !== characterId)
       return null;
   }
-  return getRecord(metadata.alternate_field_selections);
+  return getRecord2(metadata.alternate_field_selections);
 }
 function separatedReferenceBlock(label, parts) {
   const body = parts.map(compactText).filter(Boolean).join(`
@@ -2387,7 +2642,7 @@ function wrapInstructions(text) {
   return body ? `>>> Instructions <<<
 ${body}` : "";
 }
-function getRecord(value) {
+function getRecord2(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : null;
 }
 async function resolvePersonaMacro(chat, userId, fallback, characterId) {
@@ -2524,6 +2779,174 @@ function getChatPresetKey(chat, settings) {
 }
 function removeLegacyExampleSection(template) {
   return template.replace(/EXAMPLE OF A PERFECT RESPONSE:\s*```json\s*\{\{\s*example_response\s*\}\}\s*```/gi, "");
+}
+function buildPartialResponseSchema(trackerSchema, selections) {
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      updates: {
+        type: "object",
+        additionalProperties: false,
+        properties: Object.fromEntries(selections.map((selection) => [selection.id, selection.schema])),
+        required: selections.map((selection) => selection.id)
+      }
+    },
+    required: ["updates"]
+  };
+  if (typeof trackerSchema.$schema === "string")
+    schema.$schema = trackerSchema.$schema;
+  return schema;
+}
+function buildPartialRegenerationPrompt(tracker, selections, responseSchema, originalInstructions) {
+  const fieldMap = selections.map((selection) => [
+    `${selection.id}: ${selection.label}`,
+    `Current value: ${JSON.stringify(selection.currentValue, null, 2)}`,
+    `Value schema: ${JSON.stringify(selection.schema, null, 2)}`
+  ].join(`
+`)).join(`
+
+`);
+  return [
+    "ORIGINAL TRACKER INSTRUCTIONS (semantic guidance only):",
+    originalInstructions,
+    "",
+    "PARTIAL TRACKER UPDATE TASK (this output contract takes precedence):",
+    "Regenerate only the selected tracker fields using the conversation and reference context.",
+    "Keep identities and continuity consistent with the current tracker. Do not invent changes unsupported by the scene.",
+    "Return exactly one JSON object matching the response schema. Do not add prose or markdown outside it.",
+    "",
+    "CURRENT TRACKER (read-only except for the selected fields):",
+    JSON.stringify(tracker, null, 2),
+    "",
+    "SELECTED FIELDS:",
+    fieldMap,
+    "",
+    "RESPONSE JSON SCHEMA:",
+    JSON.stringify(responseSchema, null, 2)
+  ].join(`
+`);
+}
+async function regenerateTrackerFields(messageId, swipeId, rawPaths, userId) {
+  if (!userId)
+    throw new Error("SceneMap needs a user context before regenerating tracker fields.");
+  if (typeof messageId !== "string" || !messageId)
+    throw new Error("The tracker message is missing.");
+  if (!Number.isSafeInteger(swipeId) || swipeId < 0)
+    throw new Error("The tracker swipe is invalid.");
+  const paths = normalizeTrackerPaths(rawPaths);
+  const activeGeneration = activeGenerations.get(userId);
+  if (activeGeneration) {
+    sendGenerationStatus(userId);
+    pushStateInBackground(userId);
+    return;
+  }
+  const controller = new AbortController;
+  const generation = activeGenerations.start(userId, controller);
+  sendGenerationStatus(userId);
+  try {
+    throwIfGenerationCancelled(controller.signal);
+    const { chat, messages } = await raceWithAbort(getActiveContext(userId), controller.signal);
+    if (!chat)
+      throw new Error("Open a chat before regenerating SceneMap fields.");
+    const target = messages.find((message) => message.id === messageId);
+    if (!target || target.role !== "assistant")
+      throw new Error("The tracker message is no longer available.");
+    if (getActiveSwipeId(target) !== swipeId) {
+      throw new Error("The tracker swipe changed while the field picker was open.");
+    }
+    activeGenerations.setMessageId(generation, target.id);
+    sendGenerationStatus(userId);
+    const targetSwipeSnapshot = captureSwipeSnapshot(target, swipeId);
+    if (!targetSwipeSnapshot)
+      throw new Error("SceneMap could not read the target swipe.");
+    const settings = await raceWithAbort(loadSettings(userId), controller.signal);
+    const presetKey = getChatPresetKey(chat, settings);
+    const preset = settings.schemaPresets[presetKey] ?? settings.schemaPresets[settings.schemaPreset] ?? settings.schemaPresets.default;
+    validateSchemaDefinition(preset.value);
+    const currentSchemaHash = schemaFingerprint(preset.value);
+    const storedTracker = getTrackerFromStore(getTrackerStore2(target), swipeId);
+    if (!storedTracker || storedTracker.schemaHash !== currentSchemaHash) {
+      throw new Error("This tracker uses another or unknown schema. Regenerate the entire tracker first.");
+    }
+    const baseline = validateTrackerData(storedTracker.value, preset.value);
+    const availableFields = new Map(collectRegeneratableFields(baseline).map((field) => [trackerPathKey(field.path), field]));
+    const selections = paths.map((path, index) => {
+      const field = availableFields.get(trackerPathKey(path));
+      if (!field)
+        throw new Error(`Tracker field "${formatTrackerPath(path, baseline)}" cannot be regenerated separately.`);
+      const fieldSchema = getTrackerSubschema(preset.value, path);
+      if (fieldSchema === null) {
+        throw new Error(`SceneMap could not find the schema for "${formatTrackerPath(path, baseline)}".`);
+      }
+      return {
+        id: `field_${index + 1}`,
+        path,
+        label: formatTrackerPath(path, baseline),
+        currentValue: field.currentValue,
+        schema: fieldSchema
+      };
+    });
+    const responseSchema = buildPartialResponseSchema(preset.value, selections);
+    const schemaExample = createValidatedSchemaExample(preset.value);
+    const originalInstructions = renderPrompt(getPresetPrompt(settings, presetKey), {
+      schema: JSON.stringify(preset.value, null, 2),
+      previous_tracker: JSON.stringify(baseline, null, 2),
+      example_response: schemaExample === null ? "" : JSON.stringify(schemaExample, null, 2),
+      example_section: ""
+    });
+    const partialPrompt = buildPartialRegenerationPrompt(baseline, selections, responseSchema, originalInstructions);
+    const characterId = resolveMessageCharacterId(chat, target);
+    const context = { chatId: chat.id, characterId, userId };
+    const promptMessages = await raceWithAbort(resolvePromptMessages(trimMessagesForPrompt(messages, target.id, settings.includeLastXMessages), context), controller.signal);
+    const referenceMessages = await raceWithAbort(buildReferencePromptMessages(chat, userId, characterId, target.id), controller.signal);
+    promptMessages.unshift(...referenceMessages);
+    promptMessages.push({ role: "user", content: wrapInstructions(partialPrompt) });
+    spindle.toast.info(selections.length === 1 ? "Regenerating selected field..." : `Regenerating ${selections.length} selected fields...`, { title: "SceneMap", userId });
+    const result = await raceWithAbort(generateQuiet({
+      messages: promptMessages,
+      connection_id: settings.connectionId || undefined,
+      userId,
+      parameters: {
+        max_tokens: Math.max(1, Math.floor(settings.maxResponseTokens)),
+        temperature: resolveSamplingParameter(settings.temperature, 0, 2),
+        top_p: resolveSamplingParameter(settings.topP, 0, 1)
+      },
+      signal: controller.signal
+    }), controller.signal);
+    throwIfGenerationCancelled(controller.signal);
+    const parsed = parseAndValidateModelJson(result.content, responseSchema);
+    const merged = applyTrackerFieldUpdates(baseline, selections.map((selection) => ({
+      path: selection.path,
+      value: parsed.updates[selection.id]
+    })));
+    const validated = validateTrackerData(merged, preset.value, "Partially regenerated tracker");
+    const currentMessages = await raceWithAbort(spindle.chat.getMessages(chat.id), controller.signal);
+    const currentTarget = currentMessages.find((message) => message.id === target.id);
+    if (!currentTarget)
+      throw new Error("SceneMap target message was deleted during generation.");
+    if (!swipeSnapshotMatches(targetSwipeSnapshot, currentTarget, swipeId)) {
+      throw new Error("SceneMap target swipe changed during generation. Select the fields again.");
+    }
+    const currentStoredTracker = getTrackerFromStore(getTrackerStore2(currentTarget), swipeId);
+    if (!currentStoredTracker || currentStoredTracker.schemaHash !== currentSchemaHash || !jsonValuesEqual(currentStoredTracker.value, baseline)) {
+      throw new Error("The tracker changed during generation. Select the fields again.");
+    }
+    await raceWithAbort(spindle.chat.updateMessage(chat.id, target.id, {
+      metadata: mergeTrackerMetadata(currentTarget.metadata, validated, swipeId, {
+        presetKey,
+        schemaHash: currentSchemaHash
+      })
+    }), controller.signal);
+    spindle.toast.success(selections.length === 1 ? "Selected field updated." : "Selected fields updated.", { title: "SceneMap", userId });
+  } catch (error) {
+    if (error.name !== "AbortError")
+      throw error;
+  } finally {
+    activeGenerations.finish(generation);
+    sendGenerationStatus(userId);
+    pushStateInBackground(userId);
+  }
 }
 async function generateTracker(userId, expectedLatestMessageId) {
   if (!userId)
@@ -2762,6 +3185,9 @@ spindle.onFrontendMessage(async (payload, userId) => {
       case "generate_tracker":
         await generateTracker(userId);
         break;
+      case "regenerate_fields":
+        await regenerateTrackerFields(payload.messageId, payload.swipeId, payload.paths, userId);
+        break;
       case "cancel_generation":
         cancelTrackerGeneration(userId);
         break;
@@ -2788,7 +3214,7 @@ spindle.onFrontendMessage(async (payload, userId) => {
       }
     }
   } catch (error) {
-    const isGenerationRequest = payload?.type === "generate_tracker";
+    const isGenerationRequest = payload?.type === "generate_tracker" || payload?.type === "regenerate_fields";
     spindle.sendToFrontend({
       type: "error",
       message: error.message,
@@ -2809,9 +3235,9 @@ spindle.on("GENERATION_STARTED", (payload, userId) => {
 spindle.on("WORLD_INFO_ACTIVATED", (payload, userId) => {
   if (!userId)
     return;
-  const event = getRecord(payload);
+  const event = getRecord2(payload);
   const chatId = compactText(event?.chatId);
-  const entries = Array.isArray(event?.entries) ? event.entries.filter((entry) => getRecord(entry) !== null) : null;
+  const entries = Array.isArray(event?.entries) ? event.entries.filter((entry) => getRecord2(entry) !== null) : null;
   if (chatId && entries)
     worldInfoActivations.capture(userId, chatId, entries);
 });
@@ -2824,7 +3250,7 @@ for (const event of ["MESSAGE_EDITED", "MESSAGE_DELETED", "MESSAGE_SWIPED", "SWI
   spindle.on(event, (payload, userId) => {
     if (!userId)
       return;
-    const chatId = compactText(getRecord(payload)?.chatId);
+    const chatId = compactText(getRecord2(payload)?.chatId);
     if (chatId)
       worldInfoActivations.invalidateChat(userId, chatId);
   });

@@ -3699,6 +3699,46 @@ function getGenerationButtonCommand(generationActive, requestPending) {
   return generationActive || requestPending ? "cancel_generation" : "generate_tracker";
 }
 
+// src/partial-regeneration.ts
+var forbiddenPathSegments = new Set(["__proto__", "prototype", "constructor"]);
+function collectRegeneratableFields(value) {
+  const fields = [];
+  collectFields(value, [], [], "", fields);
+  return fields;
+}
+function collectFields(value, path, groups, label, fields) {
+  const record = getRecord(value);
+  if (record && Object.keys(record).length > 0) {
+    const nextGroups = label ? [...groups, label] : groups;
+    for (const [key, child] of Object.entries(record)) {
+      collectFields(child, [...path, key], nextGroups, humanizeTrackerKey(key), fields);
+    }
+    return;
+  }
+  if (Array.isArray(value) && value.length > 0 && value.every((item) => getRecord(item) !== null)) {
+    const nextGroups = label ? [...groups, label] : groups;
+    value.forEach((item, index2) => {
+      const name = compactLabel(getRecord(item)?.name) || `Item ${index2 + 1}`;
+      collectFields(item, [...path, index2], [...nextGroups, name], "", fields);
+    });
+    return;
+  }
+  if (path.length === 0)
+    return;
+  fields.push({
+    path,
+    label: label || humanizeTrackerKey(String(path.at(-1) ?? "Field")),
+    groups,
+    currentValue: value
+  });
+}
+function getRecord(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+function compactLabel(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
 // src/frontend.ts
 var state = {
   settings: defaultSettings,
@@ -3737,6 +3777,7 @@ var drawerScrollRestoreFrame = null;
 var drawerView = "settings";
 var appliedTrackerPlacement = null;
 var hasReceivedInitialState = false;
+var regenerationModalHandle = null;
 var presetEditorDrafts = new Map;
 var pendingTextEditors = new Map;
 var settingsDraft = new SettingsDraftTracker;
@@ -3866,6 +3907,7 @@ function setup(ctx) {
   requestState();
   return () => {
     flushAutomaticSettingsSave();
+    closeRegenerationModal();
     rootRef?.removeEventListener("click", handleClick);
     rootRef?.removeEventListener("change", handleChange);
     rootRef?.removeEventListener("input", handleInput);
@@ -4210,7 +4252,7 @@ function trackerPanelMarkup() {
   return `
     <div class="scenemap-shell">
       <header class="scenemap-header">
-        <button class="scenemap-pill-action scenemap-tracker-action scenemap-primary" data-action="generate" ${state.activeMessageId ? "" : "disabled"}>
+        <button class="scenemap-pill-action scenemap-tracker-action scenemap-primary" data-action="${latest && !state.generationActive && !isGenerationRequestPending ? "choose-regeneration" : "generate"}" ${state.activeMessageId ? "" : "disabled"}>
           ${state.generationActive || isGenerationRequestPending ? "Cancel" : latest ? "Regenerate" : "Generate"}
         </button>
         <button class="scenemap-pill-action scenemap-tracker-action" data-action="edit" ${latest?.schemaMatchesCurrent ? "" : "disabled"}>Edit</button>
@@ -4525,12 +4567,10 @@ function handleClick(event) {
   }
   if (action === "generate") {
     const command = getGenerationButtonCommand(state.generationActive, isGenerationRequestPending);
-    clearTrackerRuntimeError();
-    beginGenerationRequest();
-    renderTrackerSurfaces();
-    renderChatToolbar();
-    send({ type: command });
+    dispatchGeneration({ type: command });
   }
+  if (action === "choose-regeneration")
+    openRegenerationModal();
   if (action === "edit" && state.latest?.schemaMatchesCurrent && state.chatId) {
     clearTrackerRuntimeError();
     const { messageId, swipeId, data: trackerData } = state.latest;
@@ -4563,6 +4603,171 @@ function handleClick(event) {
     renderDrawerSettings();
     send({ type: "save_preset_settings", requestId, settings: state.settings });
   }
+}
+function dispatchGeneration(payload) {
+  clearTrackerRuntimeError();
+  beginGenerationRequest();
+  renderTrackerSurfaces();
+  renderChatToolbar();
+  send(payload);
+}
+function openRegenerationModal() {
+  const ctx = ctxRef;
+  const latest = state.latest;
+  if (!ctx || !latest || state.generationActive || isGenerationRequestPending)
+    return;
+  closeRegenerationModal();
+  const snapshot = {
+    messageId: latest.messageId,
+    swipeId: latest.swipeId,
+    data: latest.data,
+    schemaMatchesCurrent: latest.schemaMatchesCurrent
+  };
+  const fields = snapshot.schemaMatchesCurrent ? collectRegeneratableFields(snapshot.data) : [];
+  let modal;
+  try {
+    modal = ctx.ui.showModal({
+      title: "Regenerate SceneMap",
+      width: 560,
+      maxHeight: 680
+    });
+  } catch (error) {
+    showTrackerError(error.message);
+    return;
+  }
+  regenerationModalHandle = modal;
+  const root = modal.root;
+  root.classList.add("scenemap-editor", "scenemap-regeneration-modal");
+  const modeName = `scenemap-regeneration-mode-${modal.modalId}`;
+  const fieldMarkup = renderRegenerationFieldChoices(fields);
+  root.innerHTML = `
+    <div class="scenemap-regeneration-options">
+      <label class="scenemap-regeneration-mode is-entire">
+        <input type="radio" name="${escapeAttr(modeName)}" value="entire" checked>
+        <span>
+          <strong>Entire tracker</strong>
+          <small>Regenerate everything and advance the tracker to the latest assistant reply.</small>
+        </span>
+      </label>
+      <label class="scenemap-regeneration-mode">
+        <input type="radio" name="${escapeAttr(modeName)}" value="fields" ${fields.length > 0 ? "" : "disabled"}>
+        <span>
+          <strong>Selected fields</strong>
+          <small>Replace only the checked values in this tracker.</small>
+        </span>
+      </label>
+      ${snapshot.schemaMatchesCurrent ? `<div class="scenemap-regeneration-fields">${fieldMarkup || `<p class="scenemap-regeneration-note">This tracker has no individual values to select.</p>`}</div>` : `<p class="scenemap-regeneration-note is-warning">This tracker uses another or unknown schema. Regenerate the entire tracker before updating individual fields.</p>`}
+    </div>
+    <div class="scenemap-inline-error" role="alert" data-regeneration-error hidden></div>
+    <div class="scenemap-modal-actions">
+      <span class="scenemap-modal-spacer"></span>
+      <button type="button" class="scenemap-pill-action" data-regeneration-action="cancel">Cancel</button>
+      <button type="button" class="scenemap-pill-action scenemap-primary" data-regeneration-action="submit">Regenerate</button>
+    </div>
+  `;
+  const syncControls = () => {
+    const mode = root.querySelector(`input[name="${CSS.escape(modeName)}"]:checked`)?.value ?? "entire";
+    const selectedCount = root.querySelectorAll("[data-regeneration-field]:checked").length;
+    root.classList.toggle("is-selecting-fields", mode === "fields");
+    const submit = root.querySelector('[data-regeneration-action="submit"]');
+    if (submit) {
+      submit.disabled = mode === "fields" && selectedCount === 0;
+      submit.textContent = mode === "fields" ? selectedCount > 0 ? `Regenerate selected (${selectedCount})` : "Regenerate selected" : "Regenerate";
+    }
+  };
+  const handleChange = (event) => {
+    const input = event.target;
+    if (!(input instanceof HTMLInputElement))
+      return;
+    if (input.matches("[data-regeneration-field]")) {
+      const fieldsMode = root.querySelector(`input[name="${CSS.escape(modeName)}"][value="fields"]`);
+      if (fieldsMode && !fieldsMode.disabled)
+        fieldsMode.checked = true;
+    }
+    syncControls();
+  };
+  const handleModalClick = (event) => {
+    const button = event.target.closest("[data-regeneration-action]");
+    if (!button)
+      return;
+    if (button.dataset.regenerationAction === "cancel") {
+      modal.dismiss();
+      return;
+    }
+    if (button.dataset.regenerationAction !== "submit")
+      return;
+    const currentLatest = state.latest;
+    const errorNode = root.querySelector("[data-regeneration-error]");
+    if (!currentLatest || currentLatest.messageId !== snapshot.messageId || currentLatest.swipeId !== snapshot.swipeId) {
+      if (errorNode) {
+        errorNode.textContent = "The active tracker changed while this window was open. Close it and choose the fields again.";
+        errorNode.hidden = false;
+      }
+      return;
+    }
+    const mode = root.querySelector(`input[name="${CSS.escape(modeName)}"]:checked`)?.value ?? "entire";
+    if (mode === "entire") {
+      modal.dismiss();
+      dispatchGeneration({ type: "generate_tracker" });
+      return;
+    }
+    const paths = Array.from(root.querySelectorAll("[data-regeneration-field]:checked")).map((input) => Number(input.dataset.regenerationField)).filter((index2) => Number.isSafeInteger(index2) && fields[index2]).map((index2) => fields[index2].path);
+    if (paths.length === 0) {
+      syncControls();
+      return;
+    }
+    modal.dismiss();
+    dispatchGeneration({
+      type: "regenerate_fields",
+      messageId: snapshot.messageId,
+      swipeId: snapshot.swipeId,
+      paths
+    });
+  };
+  root.addEventListener("change", handleChange);
+  root.addEventListener("click", handleModalClick);
+  modal.onDismiss(() => {
+    root.removeEventListener("change", handleChange);
+    root.removeEventListener("click", handleModalClick);
+    if (regenerationModalHandle === modal)
+      regenerationModalHandle = null;
+  });
+  syncControls();
+}
+function renderRegenerationFieldChoices(fields) {
+  const groups = new Map;
+  fields.forEach((field, index2) => {
+    const labels = field.groups.length > 0 ? field.groups : ["Tracker"];
+    const key = JSON.stringify(labels);
+    const group = groups.get(key) ?? { labels, fields: [] };
+    group.fields.push({ field, index: index2 });
+    groups.set(key, group);
+  });
+  return Array.from(groups.values()).map((group) => `
+    <section class="scenemap-regeneration-group">
+      <h3>${escapeHtml(group.labels.join(" › "))}</h3>
+      ${group.fields.map(({ field, index: index2 }) => `
+        <label class="scenemap-regeneration-field">
+          <input type="checkbox" data-regeneration-field="${index2}">
+          <span>
+            <strong>${escapeHtml(field.label)}</strong>
+            <small>${escapeHtml(regenerationValuePreview(field.currentValue))}</small>
+          </span>
+        </label>
+      `).join("")}
+    </section>
+  `).join("");
+}
+function regenerationValuePreview(value) {
+  const formatted = formatDisplayValue(value).replace(/\s+/g, " ").trim();
+  if (!formatted)
+    return "Empty";
+  return formatted.length > 140 ? `${formatted.slice(0, 137)}...` : formatted;
+}
+function closeRegenerationModal() {
+  const modal = regenerationModalHandle;
+  regenerationModalHandle = null;
+  modal?.dismiss();
 }
 function activateDrawerView(view, focusTab = false) {
   drawerView = view;
@@ -4973,10 +5178,10 @@ async function importPreset() {
   }
 }
 function parsePresetImport(value, filename) {
-  const record = getRecord(value);
+  const record = getRecord2(value);
   if (record.type !== "scenemap-preset")
     throw new Error("This is not a SceneMap preset file.");
-  const schema = getRecord(record.schema);
+  const schema = getRecord2(record.schema);
   if (Object.keys(schema).length === 0)
     throw new Error("Preset file is missing a schema object.");
   validateSchemaDefinition(schema);
@@ -4992,12 +5197,12 @@ function parsePresetImport(value, filename) {
   };
 }
 function normalizeImportedLayout(value) {
-  const record = getRecord(value);
+  const record = getRecord2(value);
   if (!Array.isArray(record.sections))
     throw new Error("Preset file is missing a layout sections array.");
   return {
     sections: record.sections.map((section) => {
-      const sectionRecord = getRecord(section);
+      const sectionRecord = getRecord2(section);
       if (!Array.isArray(sectionRecord.fields))
         throw new Error("Every layout section must include a fields array.");
       return {
@@ -5008,7 +5213,7 @@ function normalizeImportedLayout(value) {
   };
 }
 function normalizeImportedField(value) {
-  const record = getRecord(value);
+  const record = getRecord2(value);
   const display = typeof record.display === "string" && isTrackerFieldDisplay(record.display) ? record.display : "text";
   return {
     path: typeof record.path === "string" ? record.path : "",
@@ -5624,7 +5829,7 @@ function extractSchemaFieldOptions(schema) {
 }
 var MAX_LAYOUT_SCHEMA_DEPTH = 20;
 function schemaToOptions(schema, path, labelSeed, rootSchema, seenRefs = new Set, depth = 0) {
-  const source = getRecord(schema);
+  const source = getRecord2(schema);
   const ref = typeof source.$ref === "string" && source.$ref.startsWith("#/") ? source.$ref : null;
   if (depth >= MAX_LAYOUT_SCHEMA_DEPTH || ref && seenRefs.has(ref)) {
     return [{ path, label: schemaLabel(source, labelSeed), display: defaultDisplayForSchema(source, path) }];
@@ -5633,7 +5838,7 @@ function schemaToOptions(schema, path, labelSeed, rootSchema, seenRefs = new Set
   const record = normalizeSchemaForLayout(schema, rootSchema, seenRefs);
   const type = record.type;
   if (type === "array") {
-    const itemSource = getRecord(record.items);
+    const itemSource = getRecord2(record.items);
     const itemRef = typeof itemSource.$ref === "string" && itemSource.$ref.startsWith("#/") ? itemSource.$ref : null;
     if (itemRef && nextSeenRefs.has(itemRef)) {
       return [{ path, label: schemaLabel(record, labelSeed), display: "chips" }];
@@ -5658,7 +5863,7 @@ function schemaToOptions(schema, path, labelSeed, rootSchema, seenRefs = new Set
   return [{ path, label: schemaLabel(record, labelSeed), display: defaultDisplayForSchema(record, path) }];
 }
 function normalizeSchemaForLayout(schema, rootSchema, seenRefs = new Set) {
-  const source = getRecord(schema);
+  const source = getRecord2(schema);
   let normalized = { ...source };
   const ref = typeof source.$ref === "string" ? source.$ref : null;
   if (ref?.startsWith("#/") && !seenRefs.has(ref)) {
@@ -5698,7 +5903,7 @@ function resolveLocalLayoutRef(rootSchema, ref) {
   return current;
 }
 function getSchemaProperties(schema) {
-  const record = getRecord(schema);
+  const record = getRecord2(schema);
   return record.properties && typeof record.properties === "object" && !Array.isArray(record.properties) ? record.properties : null;
 }
 function schemaLabel(schema, fallback) {
@@ -5927,7 +6132,7 @@ function showSettingsError(message) {
     renderDrawerSettings();
 }
 function renderTracker(value, layout) {
-  const record = getRecord(value);
+  const record = getRecord2(value);
   if (Object.keys(record).length === 0)
     return `<div class="scenemap-empty">Tracker data is empty.</div>`;
   const sections = layout?.sections?.length ? layout.sections : DEFAULT_DISPLAY_LAYOUT.sections;
@@ -5941,7 +6146,7 @@ function renderTracker(value, layout) {
   return html || `<div class="scenemap-empty">Tracker data is empty.</div>`;
 }
 function createTrackerDataLayout(value) {
-  const record = getRecord(value);
+  const record = getRecord2(value);
   return {
     sections: [{
       title: "Tracker",
@@ -5949,7 +6154,7 @@ function createTrackerDataLayout(value) {
         if (Array.isArray(child) && child.some((item) => item && typeof item === "object" && !Array.isArray(item))) {
           const childKeys = new Set;
           for (const item of child) {
-            for (const childKey of Object.keys(getRecord(item))) {
+            for (const childKey of Object.keys(getRecord2(item))) {
               if (childKey !== "name")
                 childKeys.add(childKey);
             }
@@ -6018,12 +6223,12 @@ function renderProgressField(label, path, value) {
   `;
 }
 function renderCharacterCard(value, index2, fields) {
-  const record = getRecord(value);
+  const record = getRecord2(value);
   const name = formatDisplayValue(record.name) || `Character ${index2 + 1}`;
   const innerFields = fields.length > 0 ? fields.map((field) => renderField(field, record)).join("") : Object.entries(record).filter(([key]) => key !== "name").map(([key, child]) => renderField({ path: key, label: humanizeTrackerKey(key), display: key === "postureAndInteraction" ? "mono" : "text" }, { [key]: child })).join("");
   return `<article class="scenemap-character"><h4>${escapeHtml(name)}</h4>${innerFields}</article>`;
 }
-function getRecord(value) {
+function getRecord2(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
 function getValueByPath(value, path) {
@@ -6220,6 +6425,25 @@ body:has(.scenemap-secondary-control[aria-expanded="true"]) > [role="listbox"] {
 }
 body:has([data-spindle-modal] .scenemap-layout-editor) > [role="listbox"] { z-index: 10004 !important; }
 .scenemap-editor { display: flex; flex-direction: column; gap: 10px; }
+.scenemap-regeneration-modal { min-height: 0; color: var(--lumiverse-text); }
+.scenemap-regeneration-options { min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 8px; padding-right: 3px; }
+.scenemap-regeneration-mode { display: flex; align-items: flex-start; gap: 10px; padding: 11px 12px; border: 1px solid var(--lumiverse-border); border-radius: var(--lumiverse-radius, 8px); background: var(--lumiverse-secondary, rgba(128, 128, 128, .15)); cursor: pointer; }
+.scenemap-regeneration-mode:has(input:checked) { border-color: var(--lumiverse-primary-050, var(--lumiverse-primary, var(--lumiverse-accent))); background: var(--lumiverse-primary-010, color-mix(in srgb, var(--lumiverse-primary, var(--lumiverse-accent)) 10%, transparent)); }
+.scenemap-regeneration-mode:has(input:disabled) { opacity: .55; cursor: default; }
+.scenemap-regeneration-mode input, .scenemap-regeneration-field input { flex: 0 0 auto; margin: 2px 0 0; accent-color: var(--lumiverse-primary, var(--lumiverse-accent)); }
+.scenemap-regeneration-mode > span, .scenemap-regeneration-field > span { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.scenemap-regeneration-mode strong, .scenemap-regeneration-field strong { font-size: 13px; font-weight: 700; overflow-wrap: anywhere; }
+.scenemap-regeneration-mode small, .scenemap-regeneration-field small { color: var(--lumiverse-text-muted); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
+.scenemap-regeneration-fields { display: flex; flex-direction: column; gap: 9px; margin-top: 4px; opacity: .72; transition: opacity var(--lumiverse-transition-fast, .15s ease); }
+.scenemap-regeneration-modal.is-selecting-fields .scenemap-regeneration-fields { opacity: 1; }
+.scenemap-regeneration-group { overflow: hidden; border: 1px solid var(--lumiverse-border); border-radius: var(--lumiverse-radius, 8px); background: var(--lumiverse-fill-subtle); }
+.scenemap-regeneration-group h3 { margin: 0; padding: 8px 11px; border-bottom: 1px solid var(--lumiverse-border); color: var(--lumiverse-accent); font-size: 10px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; overflow-wrap: anywhere; }
+.scenemap-regeneration-field { display: flex; align-items: flex-start; gap: 10px; padding: 9px 11px; cursor: pointer; }
+.scenemap-regeneration-field + .scenemap-regeneration-field { border-top: 1px solid color-mix(in srgb, var(--lumiverse-border) 70%, transparent); }
+.scenemap-regeneration-field:hover { background: var(--lumiverse-secondary, rgba(128, 128, 128, .15)); }
+.scenemap-regeneration-note { margin: 4px 0 0; padding: 10px 11px; border: 1px solid var(--lumiverse-border); border-radius: var(--lumiverse-radius, 8px); color: var(--lumiverse-text-muted); background: var(--lumiverse-fill-subtle); font-size: 12px; line-height: 1.45; }
+.scenemap-regeneration-note.is-warning { color: var(--lumiverse-warning, #f59e0b); border-color: var(--lumiverse-warning-050, color-mix(in srgb, var(--lumiverse-warning) 50%, transparent)); background: var(--lumiverse-warning-015, color-mix(in srgb, var(--lumiverse-warning) 15%, transparent)); }
+.scenemap-regeneration-modal > .scenemap-modal-actions { flex: 0 0 auto; padding-top: 2px; }
 .scenemap-name-editor { display: flex; flex-direction: column; gap: 12px; color: var(--lumiverse-text); }
 .scenemap-name-editor label { display: flex; flex-direction: column; gap: 5px; color: var(--lumiverse-text-muted); font-size: 12px; }
 .scenemap-editor textarea { min-height: min(58vh, 520px); resize: vertical; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }

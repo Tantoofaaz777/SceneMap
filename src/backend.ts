@@ -5,6 +5,7 @@ import {
   defaultSettings,
   getPresetLayout,
   getPresetPrompt,
+  jsonValuesEqual,
   mergeAutomaticSettingsPatch,
   mergePresetSettings,
   mergeSettings,
@@ -31,6 +32,15 @@ import { getPreviousTrackerJson, type StoredTracker } from "./tracker-history";
 import { raceWithAbort } from "./abortable";
 import { hasResolvableMacro } from "./macro-markers";
 import { WorldInfoActivationCache } from "./world-info-activation-cache";
+import {
+  applyTrackerFieldUpdates,
+  collectRegeneratableFields,
+  formatTrackerPath,
+  getTrackerSubschema,
+  normalizeTrackerPaths,
+  trackerPathKey,
+  type TrackerPathSegment,
+} from "./partial-regeneration";
 import type {
   GenerationEndedPayloadDTO,
   GenerationRequestDTO,
@@ -678,6 +688,228 @@ function removeLegacyExampleSection(template: string): string {
   );
 }
 
+type PartialFieldSelection = {
+  id: string;
+  path: TrackerPathSegment[];
+  label: string;
+  currentValue: unknown;
+  schema: unknown;
+};
+
+function buildPartialResponseSchema(
+  trackerSchema: Record<string, unknown>,
+  selections: PartialFieldSelection[],
+): Record<string, unknown> {
+  const schema: Record<string, unknown> = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      updates: {
+        type: "object",
+        additionalProperties: false,
+        properties: Object.fromEntries(selections.map((selection) => [selection.id, selection.schema])),
+        required: selections.map((selection) => selection.id),
+      },
+    },
+    required: ["updates"],
+  };
+  if (typeof trackerSchema.$schema === "string") schema.$schema = trackerSchema.$schema;
+  return schema;
+}
+
+function buildPartialRegenerationPrompt(
+  tracker: unknown,
+  selections: PartialFieldSelection[],
+  responseSchema: Record<string, unknown>,
+  originalInstructions: string,
+): string {
+  const fieldMap = selections.map((selection) => [
+    `${selection.id}: ${selection.label}`,
+    `Current value: ${JSON.stringify(selection.currentValue, null, 2)}`,
+    `Value schema: ${JSON.stringify(selection.schema, null, 2)}`,
+  ].join("\n")).join("\n\n");
+
+  return [
+    "ORIGINAL TRACKER INSTRUCTIONS (semantic guidance only):",
+    originalInstructions,
+    "",
+    "PARTIAL TRACKER UPDATE TASK (this output contract takes precedence):",
+    "Regenerate only the selected tracker fields using the conversation and reference context.",
+    "Keep identities and continuity consistent with the current tracker. Do not invent changes unsupported by the scene.",
+    "Return exactly one JSON object matching the response schema. Do not add prose or markdown outside it.",
+    "",
+    "CURRENT TRACKER (read-only except for the selected fields):",
+    JSON.stringify(tracker, null, 2),
+    "",
+    "SELECTED FIELDS:",
+    fieldMap,
+    "",
+    "RESPONSE JSON SCHEMA:",
+    JSON.stringify(responseSchema, null, 2),
+  ].join("\n");
+}
+
+async function regenerateTrackerFields(
+  messageId: unknown,
+  swipeId: unknown,
+  rawPaths: unknown,
+  userId?: string,
+) {
+  if (!userId) throw new Error("SceneMap needs a user context before regenerating tracker fields.");
+  if (typeof messageId !== "string" || !messageId) throw new Error("The tracker message is missing.");
+  if (!Number.isSafeInteger(swipeId) || (swipeId as number) < 0) throw new Error("The tracker swipe is invalid.");
+  const paths = normalizeTrackerPaths(rawPaths);
+  const activeGeneration = activeGenerations.get(userId);
+  if (activeGeneration) {
+    sendGenerationStatus(userId);
+    pushStateInBackground(userId);
+    return;
+  }
+
+  const controller = new AbortController();
+  const generation = activeGenerations.start(userId, controller);
+  sendGenerationStatus(userId);
+  try {
+    throwIfGenerationCancelled(controller.signal);
+    const { chat, messages } = await raceWithAbort(getActiveContext(userId), controller.signal);
+    if (!chat) throw new Error("Open a chat before regenerating SceneMap fields.");
+    const target = messages.find((message) => message.id === messageId);
+    if (!target || target.role !== "assistant") throw new Error("The tracker message is no longer available.");
+    if (getActiveSwipeId(target) !== swipeId) {
+      throw new Error("The tracker swipe changed while the field picker was open.");
+    }
+    activeGenerations.setMessageId(generation, target.id);
+    sendGenerationStatus(userId);
+    const targetSwipeSnapshot = captureSwipeSnapshot(target, swipeId as number);
+    if (!targetSwipeSnapshot) throw new Error("SceneMap could not read the target swipe.");
+
+    const settings = await raceWithAbort(loadSettings(userId), controller.signal);
+    const presetKey = getChatPresetKey(chat, settings);
+    const preset = settings.schemaPresets[presetKey] ?? settings.schemaPresets[settings.schemaPreset] ?? settings.schemaPresets.default;
+    validateSchemaDefinition(preset.value);
+    const currentSchemaHash = schemaFingerprint(preset.value);
+    const storedTracker = getTrackerFromStore(getTrackerStore(target), swipeId as number);
+    if (!storedTracker || storedTracker.schemaHash !== currentSchemaHash) {
+      throw new Error("This tracker uses another or unknown schema. Regenerate the entire tracker first.");
+    }
+    const baseline = validateTrackerData(storedTracker.value, preset.value);
+    const availableFields = new Map(
+      collectRegeneratableFields(baseline).map((field) => [trackerPathKey(field.path), field]),
+    );
+    const selections = paths.map((path, index): PartialFieldSelection => {
+      const field = availableFields.get(trackerPathKey(path));
+      if (!field) throw new Error(`Tracker field "${formatTrackerPath(path, baseline)}" cannot be regenerated separately.`);
+      const fieldSchema = getTrackerSubschema(preset.value, path);
+      if (fieldSchema === null) {
+        throw new Error(`SceneMap could not find the schema for "${formatTrackerPath(path, baseline)}".`);
+      }
+      return {
+        id: `field_${index + 1}`,
+        path,
+        label: formatTrackerPath(path, baseline),
+        currentValue: field.currentValue,
+        schema: fieldSchema,
+      };
+    });
+    const responseSchema = buildPartialResponseSchema(preset.value, selections);
+    const schemaExample = createValidatedSchemaExample(preset.value);
+    const originalInstructions = renderPrompt(getPresetPrompt(settings, presetKey), {
+      schema: JSON.stringify(preset.value, null, 2),
+      previous_tracker: JSON.stringify(baseline, null, 2),
+      example_response: schemaExample === null ? "" : JSON.stringify(schemaExample, null, 2),
+      example_section: "",
+    });
+    const partialPrompt = buildPartialRegenerationPrompt(
+      baseline,
+      selections,
+      responseSchema,
+      originalInstructions,
+    );
+    const characterId = resolveMessageCharacterId(chat, target);
+    const context = { chatId: chat.id, characterId, userId };
+    const promptMessages = await raceWithAbort(
+      resolvePromptMessages(trimMessagesForPrompt(messages, target.id, settings.includeLastXMessages), context),
+      controller.signal,
+    );
+    const referenceMessages = await raceWithAbort(
+      buildReferencePromptMessages(chat, userId, characterId, target.id),
+      controller.signal,
+    );
+    promptMessages.unshift(...referenceMessages);
+    promptMessages.push({ role: "user", content: wrapInstructions(partialPrompt) });
+
+    spindle.toast.info(
+      selections.length === 1 ? "Regenerating selected field..." : `Regenerating ${selections.length} selected fields...`,
+      { title: "SceneMap", userId },
+    );
+    const result = await raceWithAbort(
+      generateQuiet({
+        messages: promptMessages,
+        connection_id: settings.connectionId || undefined,
+        userId,
+        parameters: {
+          max_tokens: Math.max(1, Math.floor(settings.maxResponseTokens)),
+          temperature: resolveSamplingParameter(settings.temperature, 0, 2),
+          top_p: resolveSamplingParameter(settings.topP, 0, 1),
+        },
+        signal: controller.signal,
+      }),
+      controller.signal,
+    );
+    throwIfGenerationCancelled(controller.signal);
+    const parsed = parseAndValidateModelJson(result.content, responseSchema) as {
+      updates: Record<string, unknown>;
+    };
+    const merged = applyTrackerFieldUpdates(
+      baseline,
+      selections.map((selection) => ({
+        path: selection.path,
+        value: parsed.updates[selection.id],
+      })),
+    );
+    const validated = validateTrackerData(merged, preset.value, "Partially regenerated tracker");
+
+    // Partial regeneration is optimistic: abort rather than overwrite an edit or
+    // another tracker write that landed while the model was running.
+    const currentMessages = await raceWithAbort(
+      spindle.chat.getMessages(chat.id) as Promise<ChatMessage[]>,
+      controller.signal,
+    );
+    const currentTarget = currentMessages.find((message) => message.id === target.id);
+    if (!currentTarget) throw new Error("SceneMap target message was deleted during generation.");
+    if (!swipeSnapshotMatches(targetSwipeSnapshot, currentTarget, swipeId as number)) {
+      throw new Error("SceneMap target swipe changed during generation. Select the fields again.");
+    }
+    const currentStoredTracker = getTrackerFromStore(getTrackerStore(currentTarget), swipeId as number);
+    if (
+      !currentStoredTracker
+      || currentStoredTracker.schemaHash !== currentSchemaHash
+      || !jsonValuesEqual(currentStoredTracker.value, baseline)
+    ) {
+      throw new Error("The tracker changed during generation. Select the fields again.");
+    }
+    await raceWithAbort(
+      spindle.chat.updateMessage(chat.id, target.id, {
+        metadata: mergeTrackerMetadata(currentTarget.metadata, validated, swipeId as number, {
+          presetKey,
+          schemaHash: currentSchemaHash,
+        }),
+      }),
+      controller.signal,
+    );
+    spindle.toast.success(
+      selections.length === 1 ? "Selected field updated." : "Selected fields updated.",
+      { title: "SceneMap", userId },
+    );
+  } catch (error) {
+    if ((error as Error).name !== "AbortError") throw error;
+  } finally {
+    activeGenerations.finish(generation);
+    sendGenerationStatus(userId);
+    pushStateInBackground(userId);
+  }
+}
+
 async function generateTracker(userId?: string, expectedLatestMessageId?: string) {
   if (!userId) throw new Error("SceneMap needs a user context before generating a tracker.");
   const activeGeneration = activeGenerations.get(userId);
@@ -941,6 +1173,9 @@ spindle.onFrontendMessage(async (payload: any, userId?: string) => {
       case "generate_tracker":
         await generateTracker(userId);
         break;
+      case "regenerate_fields":
+        await regenerateTrackerFields(payload.messageId, payload.swipeId, payload.paths, userId);
+        break;
       case "cancel_generation":
         cancelTrackerGeneration(userId);
         break;
@@ -967,7 +1202,7 @@ spindle.onFrontendMessage(async (payload: any, userId?: string) => {
       }
     }
   } catch (error) {
-    const isGenerationRequest = payload?.type === "generate_tracker";
+    const isGenerationRequest = payload?.type === "generate_tracker" || payload?.type === "regenerate_fields";
     spindle.sendToFrontend({
       type: "error",
       message: (error as Error).message,

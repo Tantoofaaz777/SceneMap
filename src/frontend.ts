@@ -22,6 +22,10 @@ import { SettingsDraftTracker } from "./settings-draft";
 import { AutomaticSettingsDraftTracker } from "./automatic-settings-draft";
 import { validateSchemaDefinition } from "./schema-validator";
 import { getGenerationButtonCommand } from "./generation-action";
+import {
+  collectRegeneratableFields,
+  type RegeneratableField,
+} from "./partial-regeneration";
 
 let state: SceneMapState = {
   settings: defaultSettings,
@@ -61,6 +65,7 @@ let drawerScrollRestoreFrame: number | null = null;
 let drawerView: "tracker" | "settings" = "settings";
 let appliedTrackerPlacement: SceneMapSettings["trackerPlacement"] | null = null;
 let hasReceivedInitialState = false;
+let regenerationModalHandle: ReturnType<SpindleFrontendContext["ui"]["showModal"]> | null = null;
 
 type AutomaticallySavedSetting =
   | "connectionId"
@@ -219,6 +224,7 @@ export function setup(ctx: SpindleFrontendContext) {
 
   return () => {
     flushAutomaticSettingsSave();
+    closeRegenerationModal();
     rootRef?.removeEventListener("click", handleClick);
     rootRef?.removeEventListener("change", handleChange);
     rootRef?.removeEventListener("input", handleInput);
@@ -588,7 +594,7 @@ function trackerPanelMarkup(): string {
   return `
     <div class="scenemap-shell">
       <header class="scenemap-header">
-        <button class="scenemap-pill-action scenemap-tracker-action scenemap-primary" data-action="generate" ${state.activeMessageId ? "" : "disabled"}>
+        <button class="scenemap-pill-action scenemap-tracker-action scenemap-primary" data-action="${latest && !state.generationActive && !isGenerationRequestPending ? "choose-regeneration" : "generate"}" ${state.activeMessageId ? "" : "disabled"}>
           ${state.generationActive || isGenerationRequestPending ? "Cancel" : latest ? "Regenerate" : "Generate"}
         </button>
         <button class="scenemap-pill-action scenemap-tracker-action" data-action="edit" ${latest?.schemaMatchesCurrent ? "" : "disabled"}>Edit</button>
@@ -934,12 +940,9 @@ function handleClick(event: Event) {
   }
   if (action === "generate") {
     const command = getGenerationButtonCommand(state.generationActive, isGenerationRequestPending);
-    clearTrackerRuntimeError();
-    beginGenerationRequest();
-    renderTrackerSurfaces();
-    renderChatToolbar();
-    send({ type: command });
+    dispatchGeneration({ type: command });
   }
+  if (action === "choose-regeneration") openRegenerationModal();
   if (action === "edit" && state.latest?.schemaMatchesCurrent && state.chatId) {
     clearTrackerRuntimeError();
     const { messageId, swipeId, data: trackerData } = state.latest;
@@ -963,6 +966,183 @@ function handleClick(event: Event) {
     renderDrawerSettings();
     send({ type: "save_preset_settings", requestId, settings: state.settings });
   }
+}
+
+function dispatchGeneration(payload: Record<string, unknown>) {
+  clearTrackerRuntimeError();
+  beginGenerationRequest();
+  renderTrackerSurfaces();
+  renderChatToolbar();
+  send(payload);
+}
+
+function openRegenerationModal() {
+  const ctx = ctxRef;
+  const latest = state.latest;
+  if (!ctx || !latest || state.generationActive || isGenerationRequestPending) return;
+  closeRegenerationModal();
+
+  const snapshot = {
+    messageId: latest.messageId,
+    swipeId: latest.swipeId,
+    data: latest.data,
+    schemaMatchesCurrent: latest.schemaMatchesCurrent,
+  };
+  const fields = snapshot.schemaMatchesCurrent ? collectRegeneratableFields(snapshot.data) : [];
+  let modal: ReturnType<SpindleFrontendContext["ui"]["showModal"]>;
+  try {
+    modal = ctx.ui.showModal({
+      title: "Regenerate SceneMap",
+      width: 560,
+      maxHeight: 680,
+    });
+  } catch (error) {
+    showTrackerError((error as Error).message);
+    return;
+  }
+  regenerationModalHandle = modal;
+  const root = modal.root;
+  root.classList.add("scenemap-editor", "scenemap-regeneration-modal");
+  const modeName = `scenemap-regeneration-mode-${modal.modalId}`;
+  const fieldMarkup = renderRegenerationFieldChoices(fields);
+  root.innerHTML = `
+    <div class="scenemap-regeneration-options">
+      <label class="scenemap-regeneration-mode is-entire">
+        <input type="radio" name="${escapeAttr(modeName)}" value="entire" checked>
+        <span>
+          <strong>Entire tracker</strong>
+          <small>Regenerate everything and advance the tracker to the latest assistant reply.</small>
+        </span>
+      </label>
+      <label class="scenemap-regeneration-mode">
+        <input type="radio" name="${escapeAttr(modeName)}" value="fields" ${fields.length > 0 ? "" : "disabled"}>
+        <span>
+          <strong>Selected fields</strong>
+          <small>Replace only the checked values in this tracker.</small>
+        </span>
+      </label>
+      ${snapshot.schemaMatchesCurrent
+        ? `<div class="scenemap-regeneration-fields">${fieldMarkup || `<p class="scenemap-regeneration-note">This tracker has no individual values to select.</p>`}</div>`
+        : `<p class="scenemap-regeneration-note is-warning">This tracker uses another or unknown schema. Regenerate the entire tracker before updating individual fields.</p>`}
+    </div>
+    <div class="scenemap-inline-error" role="alert" data-regeneration-error hidden></div>
+    <div class="scenemap-modal-actions">
+      <span class="scenemap-modal-spacer"></span>
+      <button type="button" class="scenemap-pill-action" data-regeneration-action="cancel">Cancel</button>
+      <button type="button" class="scenemap-pill-action scenemap-primary" data-regeneration-action="submit">Regenerate</button>
+    </div>
+  `;
+
+  const syncControls = () => {
+    const mode = root.querySelector<HTMLInputElement>(`input[name="${CSS.escape(modeName)}"]:checked`)?.value ?? "entire";
+    const selectedCount = root.querySelectorAll<HTMLInputElement>("[data-regeneration-field]:checked").length;
+    root.classList.toggle("is-selecting-fields", mode === "fields");
+    const submit = root.querySelector<HTMLButtonElement>('[data-regeneration-action="submit"]');
+    if (submit) {
+      submit.disabled = mode === "fields" && selectedCount === 0;
+      submit.textContent = mode === "fields"
+        ? selectedCount > 0 ? `Regenerate selected (${selectedCount})` : "Regenerate selected"
+        : "Regenerate";
+    }
+  };
+  const handleChange = (event: Event) => {
+    const input = event.target;
+    if (!(input instanceof HTMLInputElement)) return;
+    if (input.matches("[data-regeneration-field]")) {
+      const fieldsMode = root.querySelector<HTMLInputElement>(`input[name="${CSS.escape(modeName)}"][value="fields"]`);
+      if (fieldsMode && !fieldsMode.disabled) fieldsMode.checked = true;
+    }
+    syncControls();
+  };
+  const handleModalClick = (event: Event) => {
+    const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-regeneration-action]");
+    if (!button) return;
+    if (button.dataset.regenerationAction === "cancel") {
+      modal.dismiss();
+      return;
+    }
+    if (button.dataset.regenerationAction !== "submit") return;
+
+    const currentLatest = state.latest;
+    const errorNode = root.querySelector<HTMLElement>("[data-regeneration-error]");
+    if (
+      !currentLatest
+      || currentLatest.messageId !== snapshot.messageId
+      || currentLatest.swipeId !== snapshot.swipeId
+    ) {
+      if (errorNode) {
+        errorNode.textContent = "The active tracker changed while this window was open. Close it and choose the fields again.";
+        errorNode.hidden = false;
+      }
+      return;
+    }
+    const mode = root.querySelector<HTMLInputElement>(`input[name="${CSS.escape(modeName)}"]:checked`)?.value ?? "entire";
+    if (mode === "entire") {
+      modal.dismiss();
+      dispatchGeneration({ type: "generate_tracker" });
+      return;
+    }
+    const paths = Array.from(root.querySelectorAll<HTMLInputElement>("[data-regeneration-field]:checked"))
+      .map((input) => Number(input.dataset.regenerationField))
+      .filter((index) => Number.isSafeInteger(index) && fields[index])
+      .map((index) => fields[index].path);
+    if (paths.length === 0) {
+      syncControls();
+      return;
+    }
+    modal.dismiss();
+    dispatchGeneration({
+      type: "regenerate_fields",
+      messageId: snapshot.messageId,
+      swipeId: snapshot.swipeId,
+      paths,
+    });
+  };
+  root.addEventListener("change", handleChange);
+  root.addEventListener("click", handleModalClick);
+  modal.onDismiss(() => {
+    root.removeEventListener("change", handleChange);
+    root.removeEventListener("click", handleModalClick);
+    if (regenerationModalHandle === modal) regenerationModalHandle = null;
+  });
+  syncControls();
+}
+
+function renderRegenerationFieldChoices(fields: RegeneratableField[]): string {
+  const groups = new Map<string, { labels: string[]; fields: Array<{ field: RegeneratableField; index: number }> }>();
+  fields.forEach((field, index) => {
+    const labels = field.groups.length > 0 ? field.groups : ["Tracker"];
+    const key = JSON.stringify(labels);
+    const group = groups.get(key) ?? { labels, fields: [] };
+    group.fields.push({ field, index });
+    groups.set(key, group);
+  });
+  return Array.from(groups.values()).map((group) => `
+    <section class="scenemap-regeneration-group">
+      <h3>${escapeHtml(group.labels.join(" \u203a "))}</h3>
+      ${group.fields.map(({ field, index }) => `
+        <label class="scenemap-regeneration-field">
+          <input type="checkbox" data-regeneration-field="${index}">
+          <span>
+            <strong>${escapeHtml(field.label)}</strong>
+            <small>${escapeHtml(regenerationValuePreview(field.currentValue))}</small>
+          </span>
+        </label>
+      `).join("")}
+    </section>
+  `).join("");
+}
+
+function regenerationValuePreview(value: unknown): string {
+  const formatted = formatDisplayValue(value).replace(/\s+/g, " ").trim();
+  if (!formatted) return "Empty";
+  return formatted.length > 140 ? `${formatted.slice(0, 137)}...` : formatted;
+}
+
+function closeRegenerationModal() {
+  const modal = regenerationModalHandle;
+  regenerationModalHandle = null;
+  modal?.dismiss();
 }
 
 function activateDrawerView(view: "tracker" | "settings", focusTab = false) {
@@ -2781,6 +2961,25 @@ body:has(.scenemap-secondary-control[aria-expanded="true"]) > [role="listbox"] {
 }
 body:has([data-spindle-modal] .scenemap-layout-editor) > [role="listbox"] { z-index: 10004 !important; }
 .scenemap-editor { display: flex; flex-direction: column; gap: 10px; }
+.scenemap-regeneration-modal { min-height: 0; color: var(--lumiverse-text); }
+.scenemap-regeneration-options { min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 8px; padding-right: 3px; }
+.scenemap-regeneration-mode { display: flex; align-items: flex-start; gap: 10px; padding: 11px 12px; border: 1px solid var(--lumiverse-border); border-radius: var(--lumiverse-radius, 8px); background: var(--lumiverse-secondary, rgba(128, 128, 128, .15)); cursor: pointer; }
+.scenemap-regeneration-mode:has(input:checked) { border-color: var(--lumiverse-primary-050, var(--lumiverse-primary, var(--lumiverse-accent))); background: var(--lumiverse-primary-010, color-mix(in srgb, var(--lumiverse-primary, var(--lumiverse-accent)) 10%, transparent)); }
+.scenemap-regeneration-mode:has(input:disabled) { opacity: .55; cursor: default; }
+.scenemap-regeneration-mode input, .scenemap-regeneration-field input { flex: 0 0 auto; margin: 2px 0 0; accent-color: var(--lumiverse-primary, var(--lumiverse-accent)); }
+.scenemap-regeneration-mode > span, .scenemap-regeneration-field > span { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.scenemap-regeneration-mode strong, .scenemap-regeneration-field strong { font-size: 13px; font-weight: 700; overflow-wrap: anywhere; }
+.scenemap-regeneration-mode small, .scenemap-regeneration-field small { color: var(--lumiverse-text-muted); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
+.scenemap-regeneration-fields { display: flex; flex-direction: column; gap: 9px; margin-top: 4px; opacity: .72; transition: opacity var(--lumiverse-transition-fast, .15s ease); }
+.scenemap-regeneration-modal.is-selecting-fields .scenemap-regeneration-fields { opacity: 1; }
+.scenemap-regeneration-group { overflow: hidden; border: 1px solid var(--lumiverse-border); border-radius: var(--lumiverse-radius, 8px); background: var(--lumiverse-fill-subtle); }
+.scenemap-regeneration-group h3 { margin: 0; padding: 8px 11px; border-bottom: 1px solid var(--lumiverse-border); color: var(--lumiverse-accent); font-size: 10px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; overflow-wrap: anywhere; }
+.scenemap-regeneration-field { display: flex; align-items: flex-start; gap: 10px; padding: 9px 11px; cursor: pointer; }
+.scenemap-regeneration-field + .scenemap-regeneration-field { border-top: 1px solid color-mix(in srgb, var(--lumiverse-border) 70%, transparent); }
+.scenemap-regeneration-field:hover { background: var(--lumiverse-secondary, rgba(128, 128, 128, .15)); }
+.scenemap-regeneration-note { margin: 4px 0 0; padding: 10px 11px; border: 1px solid var(--lumiverse-border); border-radius: var(--lumiverse-radius, 8px); color: var(--lumiverse-text-muted); background: var(--lumiverse-fill-subtle); font-size: 12px; line-height: 1.45; }
+.scenemap-regeneration-note.is-warning { color: var(--lumiverse-warning, #f59e0b); border-color: var(--lumiverse-warning-050, color-mix(in srgb, var(--lumiverse-warning) 50%, transparent)); background: var(--lumiverse-warning-015, color-mix(in srgb, var(--lumiverse-warning) 15%, transparent)); }
+.scenemap-regeneration-modal > .scenemap-modal-actions { flex: 0 0 auto; padding-top: 2px; }
 .scenemap-name-editor { display: flex; flex-direction: column; gap: 12px; color: var(--lumiverse-text); }
 .scenemap-name-editor label { display: flex; flex-direction: column; gap: 5px; color: var(--lumiverse-text-muted); font-size: 12px; }
 .scenemap-editor textarea { min-height: min(58vh, 520px); resize: vertical; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
