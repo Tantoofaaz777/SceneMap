@@ -29,10 +29,14 @@ import { captureSwipeSnapshot, swipeSnapshotMatches } from "./swipe-snapshot";
 import { resolveMessageCharacterId } from "./group-character-context";
 import { getPreviousTrackerJson, type StoredTracker } from "./tracker-history";
 import { raceWithAbort } from "./abortable";
+import { hasResolvableMacro } from "./macro-markers";
+import { WorldInfoActivationCache } from "./world-info-activation-cache";
 import type {
   GenerationEndedPayloadDTO,
   GenerationRequestDTO,
   GenerationResponseDTO,
+  GenerationStartedPayloadDTO,
+  GenerationStoppedPayloadDTO,
 } from "lumiverse-spindle-types";
 
 declare const spindle: import("lumiverse-spindle-types").SpindleAPI;
@@ -80,6 +84,7 @@ type ConnectionSummary = {
 };
 
 const activeGenerations = new GenerationRegistry();
+const worldInfoActivations = new WorldInfoActivationCache();
 // State responses and settings writes are independently ordered per user. This
 // prevents slow storage/API calls from delivering stale acknowledgements last.
 const statePushQueue = new KeyedAsyncQueue();
@@ -351,6 +356,7 @@ async function buildReferencePromptMessages(
   chat: ActiveChat,
   userId: string,
   characterId: string | null,
+  targetMessageId: string,
 ): Promise<PromptMessage[]> {
   const context: ReferenceContext = {
     chatId: chat.id,
@@ -360,7 +366,7 @@ async function buildReferencePromptMessages(
   const [characterContext, personaReference, activeWorldInfo] = await Promise.all([
     buildCharacterContext(chat, userId, characterId),
     buildPersonaReference(chat, userId, characterId),
-    buildActiveWorldInfo(chat.id, userId),
+    buildActiveWorldInfo(chat.id, userId, targetMessageId),
   ]);
   // Scenario intentionally leads World Info instead of the character block. Each
   // reference block is a separate system message so sources stay distinguishable.
@@ -416,16 +422,28 @@ async function buildPersonaReference(
   }
 }
 
-async function buildActiveWorldInfo(chatId: string, userId: string): Promise<string[]> {
+async function buildActiveWorldInfo(
+  chatId: string,
+  userId: string,
+  targetMessageId: string,
+): Promise<string[]> {
   try {
-    const activated = await spindle.world_books.getActivated(chatId, userId);
-    if (!activated.length) return [];
-    const entries = await Promise.all(activated.map(async (entry: any) => {
+    // Prefer the exact activation emitted for the generation that produced the
+    // target reply. Manual/imported/ambiguous cases deliberately fall back to
+    // Lumiverse's complete activation query for the current chat.
+    let entryIds = worldInfoActivations.get(userId, chatId, targetMessageId);
+    if (entryIds === null) {
+      const activated = await spindle.world_books.getActivated(chatId, userId);
+      entryIds = activated.map((entry) => entry.id);
+    }
+    if (!entryIds.length) return [];
+
+    const entries = await Promise.all(entryIds.map(async (entryId) => {
       try {
-        const fullEntry = await spindle.world_books.entries.get(entry.id, userId);
+        const fullEntry = await spindle.world_books.entries.get(entryId, userId);
         return compactText(fullEntry?.content);
       } catch (error) {
-        spindle.log.warn(`SceneMap could not read active world info entry ${String(entry.id)}: ${(error as Error).message}`);
+        spindle.log.warn(`SceneMap could not read active world info entry ${entryId}: ${(error as Error).message}`);
         return "";
       }
     }));
@@ -520,7 +538,7 @@ function compactText(value: unknown): string {
 }
 
 async function resolveDisplayText(text: string, context: { chatId: string; characterId?: string | null; userId: string }): Promise<string> {
-  if (!text.includes("{{")) return text;
+  if (!hasResolvableMacro(text)) return text;
   try {
     const result = await spindle.macros.resolve(text, {
       chatId: context.chatId,
@@ -722,7 +740,7 @@ async function generateTracker(userId?: string, expectedLatestMessageId?: string
       controller.signal,
     );
     const referenceMessages = await raceWithAbort(
-      buildReferencePromptMessages(chat, userId, characterId),
+      buildReferencePromptMessages(chat, userId, characterId, target.id),
       controller.signal,
     );
     promptMessages.unshift(...referenceMessages);
@@ -963,12 +981,49 @@ spindle.onFrontendMessage(async (payload: any, userId?: string) => {
   }
 });
 
+spindle.on("GENERATION_STARTED", (payload: GenerationStartedPayloadDTO, userId?: string) => {
+  if (!userId) return;
+  worldInfoActivations.begin(userId, payload.generationId, payload.chatId);
+});
+
+spindle.on("WORLD_INFO_ACTIVATED", (payload: unknown, userId?: string) => {
+  if (!userId) return;
+  const event = getRecord(payload);
+  const chatId = compactText(event?.chatId);
+  const entries = Array.isArray(event?.entries)
+    ? event.entries.filter((entry): entry is { id: unknown } => getRecord(entry) !== null)
+    : null;
+  if (chatId && entries) worldInfoActivations.capture(userId, chatId, entries);
+});
+
+spindle.on("GENERATION_STOPPED", (payload: GenerationStoppedPayloadDTO, userId?: string) => {
+  if (!userId) return;
+  worldInfoActivations.discard(userId, payload.generationId, payload.chatId);
+});
+
+// Any edit or swipe can change the text that World Info scanned. Invalidating
+// the whole chat is cheap and prevents a later manual tracker from borrowing a
+// snapshot produced from a different history/swipe selection.
+for (const event of ["MESSAGE_EDITED", "MESSAGE_DELETED", "MESSAGE_SWIPED", "SWIPE_EDITED"]) {
+  spindle.on(event, (payload: unknown, userId?: string) => {
+    if (!userId) return;
+    const chatId = compactText(getRecord(payload)?.chatId);
+    if (chatId) worldInfoActivations.invalidateChat(userId, chatId);
+  });
+}
+
 spindle.on("GENERATION_ENDED", (payload: GenerationEndedPayloadDTO, userId?: string) => {
-  if (payload.error || !payload.messageId) return;
   if (!userId) {
-    spindle.log.warn("SceneMap auto-generation skipped: generation event did not include a user context.");
+    if (!payload.error && payload.messageId) {
+      spindle.log.warn("SceneMap auto-generation skipped: generation event did not include a user context.");
+    }
     return;
   }
+  if (payload.error || !payload.messageId) {
+    worldInfoActivations.discard(userId, payload.generationId, payload.chatId);
+    return;
+  }
+  worldInfoActivations.complete(userId, payload.generationId, payload.chatId, payload.messageId);
   void maybeAutoGenerateTracker(payload.messageId, userId).catch((error) => {
     const message = (error as Error).message;
     spindle.log.error(`SceneMap auto-generation failed: ${message}`);

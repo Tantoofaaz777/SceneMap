@@ -1965,8 +1965,86 @@ function raceWithAbort(operation, signal) {
   });
 }
 
+// src/macro-markers.ts
+var RESOLVABLE_MACRO_RE = /\{\{|<(?:user|char|bot)>/i;
+function hasResolvableMacro(text) {
+  return RESOLVABLE_MACRO_RE.test(text);
+}
+
+// src/world-info-activation-cache.ts
+class WorldInfoActivationCache {
+  pendingByGenerationId = new Map;
+  boundByScope = new Map;
+  begin(userId, generationId, chatId) {
+    if (!userId || !generationId || !chatId)
+      return;
+    for (const [pendingGenerationId, pending] of this.pendingByGenerationId) {
+      if (pending.userId === userId && pending.chatId === chatId) {
+        this.pendingByGenerationId.delete(pendingGenerationId);
+      }
+    }
+    this.pendingByGenerationId.set(generationId, {
+      userId,
+      chatId,
+      entryIds: null
+    });
+  }
+  capture(userId, chatId, entries) {
+    const matching = Array.from(this.pendingByGenerationId.values()).filter((pending) => pending.userId === userId && pending.chatId === chatId);
+    if (matching.length !== 1)
+      return false;
+    matching[0].entryIds = uniqueEntryIds(entries);
+    return true;
+  }
+  complete(userId, generationId, chatId, messageId) {
+    const pending = this.takePending(userId, generationId, chatId);
+    if (!pending || pending.entryIds === null || !messageId)
+      return false;
+    this.boundByScope.set(scopeKey(userId, chatId), {
+      messageId,
+      entryIds: [...pending.entryIds]
+    });
+    return true;
+  }
+  discard(userId, generationId, chatId) {
+    this.takePending(userId, generationId, chatId);
+  }
+  get(userId, chatId, messageId) {
+    const bound = this.boundByScope.get(scopeKey(userId, chatId));
+    if (!bound || bound.messageId !== messageId)
+      return null;
+    return [...bound.entryIds];
+  }
+  invalidateChat(userId, chatId) {
+    this.boundByScope.delete(scopeKey(userId, chatId));
+  }
+  takePending(userId, generationId, chatId) {
+    const pending = this.pendingByGenerationId.get(generationId);
+    if (!pending || pending.userId !== userId || pending.chatId !== chatId)
+      return null;
+    this.pendingByGenerationId.delete(generationId);
+    return pending;
+  }
+}
+function uniqueEntryIds(entries) {
+  const seen = new Set;
+  const ids = [];
+  for (const entry of entries) {
+    const id = typeof entry?.id === "string" ? entry.id.trim() : "";
+    if (!id || seen.has(id))
+      continue;
+    seen.add(id);
+    ids.push(id);
+  }
+  return ids;
+}
+function scopeKey(userId, chatId) {
+  return JSON.stringify([userId, chatId]);
+}
+
 // src/backend.ts
 var activeGenerations = new GenerationRegistry;
+var worldInfoActivations = new WorldInfoActivationCache;
 var statePushQueue = new KeyedAsyncQueue;
 var settingsSaveQueue = new KeyedAsyncQueue;
 var STATE_BUILD_TIMEOUT_MS = 1e4;
@@ -2180,7 +2258,7 @@ async function resolveTrackerDisplayData(value, context) {
   ]));
   return Object.fromEntries(entries);
 }
-async function buildReferencePromptMessages(chat, userId, characterId) {
+async function buildReferencePromptMessages(chat, userId, characterId, targetMessageId) {
   const context = {
     chatId: chat.id,
     characterId,
@@ -2189,7 +2267,7 @@ async function buildReferencePromptMessages(chat, userId, characterId) {
   const [characterContext, personaReference, activeWorldInfo] = await Promise.all([
     buildCharacterContext(chat, userId, characterId),
     buildPersonaReference(chat, userId, characterId),
-    buildActiveWorldInfo(chat.id, userId)
+    buildActiveWorldInfo(chat.id, userId, targetMessageId)
   ]);
   const worldInfoReference = separatedReferenceBlock("World Info", [
     characterContext.scenario,
@@ -2235,17 +2313,21 @@ async function buildPersonaReference(chat, userId, characterId) {
     return null;
   }
 }
-async function buildActiveWorldInfo(chatId, userId) {
+async function buildActiveWorldInfo(chatId, userId, targetMessageId) {
   try {
-    const activated = await spindle.world_books.getActivated(chatId, userId);
-    if (!activated.length)
+    let entryIds = worldInfoActivations.get(userId, chatId, targetMessageId);
+    if (entryIds === null) {
+      const activated = await spindle.world_books.getActivated(chatId, userId);
+      entryIds = activated.map((entry) => entry.id);
+    }
+    if (!entryIds.length)
       return [];
-    const entries = await Promise.all(activated.map(async (entry) => {
+    const entries = await Promise.all(entryIds.map(async (entryId) => {
       try {
-        const fullEntry = await spindle.world_books.entries.get(entry.id, userId);
+        const fullEntry = await spindle.world_books.entries.get(entryId, userId);
         return compactText(fullEntry?.content);
       } catch (error) {
-        spindle.log.warn(`SceneMap could not read active world info entry ${String(entry.id)}: ${error.message}`);
+        spindle.log.warn(`SceneMap could not read active world info entry ${entryId}: ${error.message}`);
         return "";
       }
     }));
@@ -2328,7 +2410,7 @@ function compactText(value) {
 `).trim() : "";
 }
 async function resolveDisplayText(text, context) {
-  if (!text.includes("{{"))
+  if (!hasResolvableMacro(text))
     return text;
   try {
     const result = await spindle.macros.resolve(text, {
@@ -2494,7 +2576,7 @@ ${exampleResponse}
     const characterId = resolveMessageCharacterId(chat, target);
     const context = { chatId: chat.id, characterId, userId };
     const promptMessages = await raceWithAbort(resolvePromptMessages(trimMessagesForPrompt(messages, target.id, settings.includeLastXMessages), context), controller.signal);
-    const referenceMessages = await raceWithAbort(buildReferencePromptMessages(chat, userId, characterId), controller.signal);
+    const referenceMessages = await raceWithAbort(buildReferencePromptMessages(chat, userId, characterId, target.id), controller.signal);
     promptMessages.unshift(...referenceMessages);
     promptMessages.push({ role: "user", content: wrapInstructions(finalPrompt) });
     spindle.toast.info("Mapping this scene...", { title: "SceneMap", userId });
@@ -2719,13 +2801,46 @@ spindle.onFrontendMessage(async (payload, userId) => {
     });
   }
 });
-spindle.on("GENERATION_ENDED", (payload, userId) => {
-  if (payload.error || !payload.messageId)
+spindle.on("GENERATION_STARTED", (payload, userId) => {
+  if (!userId)
     return;
+  worldInfoActivations.begin(userId, payload.generationId, payload.chatId);
+});
+spindle.on("WORLD_INFO_ACTIVATED", (payload, userId) => {
+  if (!userId)
+    return;
+  const event = getRecord(payload);
+  const chatId = compactText(event?.chatId);
+  const entries = Array.isArray(event?.entries) ? event.entries.filter((entry) => getRecord(entry) !== null) : null;
+  if (chatId && entries)
+    worldInfoActivations.capture(userId, chatId, entries);
+});
+spindle.on("GENERATION_STOPPED", (payload, userId) => {
+  if (!userId)
+    return;
+  worldInfoActivations.discard(userId, payload.generationId, payload.chatId);
+});
+for (const event of ["MESSAGE_EDITED", "MESSAGE_DELETED", "MESSAGE_SWIPED", "SWIPE_EDITED"]) {
+  spindle.on(event, (payload, userId) => {
+    if (!userId)
+      return;
+    const chatId = compactText(getRecord(payload)?.chatId);
+    if (chatId)
+      worldInfoActivations.invalidateChat(userId, chatId);
+  });
+}
+spindle.on("GENERATION_ENDED", (payload, userId) => {
   if (!userId) {
-    spindle.log.warn("SceneMap auto-generation skipped: generation event did not include a user context.");
+    if (!payload.error && payload.messageId) {
+      spindle.log.warn("SceneMap auto-generation skipped: generation event did not include a user context.");
+    }
     return;
   }
+  if (payload.error || !payload.messageId) {
+    worldInfoActivations.discard(userId, payload.generationId, payload.chatId);
+    return;
+  }
+  worldInfoActivations.complete(userId, payload.generationId, payload.chatId, payload.messageId);
   maybeAutoGenerateTracker(payload.messageId, userId).catch((error) => {
     const message = error.message;
     spindle.log.error(`SceneMap auto-generation failed: ${message}`);
