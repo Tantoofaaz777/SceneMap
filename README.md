@@ -21,7 +21,7 @@ SceneMap is a Lumiverse Spindle extension that tracks roleplay scene state as st
 Install this repository through Lumiverse's Extensions panel:
 
 ```txt
-https://github.com/Tantoofaaz777/SceneMap-Lumiverse
+https://github.com/Tantoofaaz777/SceneMap
 ```
 
 Required permissions:
