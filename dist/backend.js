@@ -154,6 +154,7 @@ var defaultSettings = {
   autoGenerateAiTrackers: false,
   autoGenerateInterval: 1,
   showInputBarButton: true,
+  showTopToolbarButton: false,
   trackerPlacement: "dock",
   schemaPreset: "default",
   schemaPresets: {
@@ -187,6 +188,7 @@ function mergeSettings(value) {
     temperature: typeof currentValue.temperature === "number" && Number.isFinite(currentValue.temperature) ? resolveSamplingParameter(currentValue.temperature, 0, 2) : base.temperature,
     topP: typeof currentValue.topP === "number" && Number.isFinite(currentValue.topP) ? resolveSamplingParameter(currentValue.topP, 0, 1) : base.topP,
     includeLastXMessages: typeof currentValue.includeLastXMessages === "number" && Number.isFinite(currentValue.includeLastXMessages) ? Math.max(0, Math.floor(currentValue.includeLastXMessages)) : base.includeLastXMessages,
+    showTopToolbarButton: typeof currentValue.showTopToolbarButton === "boolean" ? currentValue.showTopToolbarButton : base.showTopToolbarButton,
     trackerPlacement: currentValue.trackerPlacement === "drawer" ? "drawer" : "dock",
     schemaPresets,
     displayLayout: currentValue.displayLayout?.sections?.length ? currentValue.displayLayout : base.displayLayout
@@ -219,6 +221,8 @@ function mergeAutomaticSettingsPatch(currentValue, value) {
   }
   if (typeof patch.showInputBarButton === "boolean")
     next.showInputBarButton = patch.showInputBarButton;
+  if (typeof patch.showTopToolbarButton === "boolean")
+    next.showTopToolbarButton = patch.showTopToolbarButton;
   if (patch.trackerPlacement === "dock" || patch.trackerPlacement === "drawer") {
     next.trackerPlacement = patch.trackerPlacement;
   }

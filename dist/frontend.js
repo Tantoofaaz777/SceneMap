@@ -2348,6 +2348,7 @@ var defaultSettings = {
   autoGenerateAiTrackers: false,
   autoGenerateInterval: 1,
   showInputBarButton: true,
+  showTopToolbarButton: false,
   trackerPlacement: "dock",
   schemaPreset: "default",
   schemaPresets: {
@@ -2381,6 +2382,7 @@ function mergeSettings(value) {
     temperature: typeof currentValue.temperature === "number" && Number.isFinite(currentValue.temperature) ? resolveSamplingParameter(currentValue.temperature, 0, 2) : base.temperature,
     topP: typeof currentValue.topP === "number" && Number.isFinite(currentValue.topP) ? resolveSamplingParameter(currentValue.topP, 0, 1) : base.topP,
     includeLastXMessages: typeof currentValue.includeLastXMessages === "number" && Number.isFinite(currentValue.includeLastXMessages) ? Math.max(0, Math.floor(currentValue.includeLastXMessages)) : base.includeLastXMessages,
+    showTopToolbarButton: typeof currentValue.showTopToolbarButton === "boolean" ? currentValue.showTopToolbarButton : base.showTopToolbarButton,
     trackerPlacement: currentValue.trackerPlacement === "drawer" ? "drawer" : "dock",
     schemaPresets,
     displayLayout: currentValue.displayLayout?.sections?.length ? currentValue.displayLayout : base.displayLayout
@@ -3739,6 +3741,32 @@ function compactLabel(value) {
   return typeof value === "string" ? value.trim() : "";
 }
 
+// src/top-toolbar-status.ts
+function getTopToolbarStatus(state, requestPending = false) {
+  if (state.generationActive || requestPending) {
+    return { tone: "generating", text: "Mapping this scene" };
+  }
+  if (!state.chatId || !state.activeMessageId) {
+    return { tone: "neutral", text: "Open a chat with an assistant reply" };
+  }
+  if (!state.latest) {
+    return { tone: "warning", text: "SceneMap has not been generated" };
+  }
+  if (!state.latest.schemaMatchesCurrent) {
+    return { tone: "warning", text: "SceneMap uses another or outdated schema" };
+  }
+  if (state.messagesBehind > 0) {
+    return {
+      tone: "warning",
+      text: `SceneMap is ${state.messagesBehind} message${state.messagesBehind === 1 ? "" : "s"} behind`
+    };
+  }
+  if (state.latest.messageId !== state.activeMessageId || state.latest.swipeId !== state.activeSwipeId) {
+    return { tone: "warning", text: "SceneMap is out of date for the active swipe" };
+  }
+  return { tone: "success", text: "SceneMap is updated" };
+}
+
 // src/frontend.ts
 var state = {
   settings: defaultSettings,
@@ -3757,6 +3785,10 @@ var ctxRef = null;
 var rootRef = null;
 var dockRootRef = null;
 var toolbarRootRef = null;
+var topToolbarInjection = null;
+var topToolbarObserver = null;
+var topToolbarObservationRoot = null;
+var topToolbarEnsureQueued = false;
 var tabHandle = null;
 var dockPanelHandle = null;
 var dockResizeObserver = null;
@@ -3868,6 +3900,7 @@ function setup(ctx) {
       };
       renderTrackerSurfaces();
       renderChatToolbar();
+      renderTopToolbarButton();
       return;
     }
     if (payload?.type === "error") {
@@ -3878,6 +3911,7 @@ function setup(ctx) {
         clearGenerationRequestPending();
       syncSettingsDraftUi();
       renderChatToolbar();
+      renderTopToolbarButton();
       if (saveFailed || automaticSaveFailed) {
         tabHandle?.activate();
         showSettingsError(payload.message);
@@ -3908,6 +3942,7 @@ function setup(ctx) {
   return () => {
     flushAutomaticSettingsSave();
     closeRegenerationModal();
+    destroyTopToolbarButton();
     rootRef?.removeEventListener("click", handleClick);
     rootRef?.removeEventListener("change", handleChange);
     rootRef?.removeEventListener("input", handleInput);
@@ -4126,6 +4161,7 @@ function beginGenerationRequest() {
     trackerRuntimeError = "SceneMap did not receive a generation response. Use Cancel to safely reset it.";
     renderTrackerSurfaces();
     renderChatToolbar();
+    renderTopToolbarButton();
     requestState();
   }, GENERATION_REQUEST_TIMEOUT_MS);
 }
@@ -4147,6 +4183,8 @@ function render(options = {}) {
   if (!options.preserveSettingsSurface)
     renderDrawerContent();
   renderChatToolbar();
+  syncTopToolbarPlacement();
+  renderTopToolbarButton();
   tabHandle?.setBadge(state.messagesBehind > 0 ? String(state.messagesBehind) : null);
 }
 function renderTrackerSurfaces() {
@@ -4331,11 +4369,18 @@ function renderDrawerSettings() {
             <span>Tracker location</span>
             <div class="scenemap-native-select" data-native-setting="trackerPlacement"></div>
           </label>
-          <label class="scenemap-switch-row">
-            <span>Show input bar button</span>
-            <input type="checkbox" data-setting="showInputBarButton" ${settings.showInputBarButton ? "checked" : ""}>
-            <span class="scenemap-switch" aria-hidden="true"></span>
-          </label>
+          <div class="scenemap-interface-switches">
+            <label class="scenemap-switch-row">
+              <span>Show top toolbar button</span>
+              <input type="checkbox" data-setting="showTopToolbarButton" ${settings.showTopToolbarButton ? "checked" : ""}>
+              <span class="scenemap-switch" aria-hidden="true"></span>
+            </label>
+            <label class="scenemap-switch-row">
+              <span>Show input bar button</span>
+              <input type="checkbox" data-setting="showInputBarButton" ${settings.showInputBarButton ? "checked" : ""}>
+              <span class="scenemap-switch" aria-hidden="true"></span>
+            </label>
+          </div>
         </div>
         <div class="scenemap-settings-group scenemap-settings-preset-row">
           <div class="scenemap-settings-group-heading">
@@ -5026,7 +5071,7 @@ function handleInput(event) {
   updateSettingFromControl(target, key, false);
 }
 function isAutomaticallySavedSetting(key) {
-  return key === "connectionId" || key === "autoGenerateAiTrackers" || key === "autoGenerateInterval" || key === "maxResponseTokens" || key === "temperature" || key === "topP" || key === "includeLastXMessages" || key === "showInputBarButton" || key === "trackerPlacement";
+  return key === "connectionId" || key === "autoGenerateAiTrackers" || key === "autoGenerateInterval" || key === "maxResponseTokens" || key === "temperature" || key === "topP" || key === "includeLastXMessages" || key === "showInputBarButton" || key === "showTopToolbarButton" || key === "trackerPlacement";
 }
 function updateSettingFromControl(target, key, immediate) {
   const settings = mergeSettings(state.settings);
@@ -5035,6 +5080,8 @@ function updateSettingFromControl(target, key, immediate) {
     settings.autoGenerateAiTrackers = target.checked;
   } else if (key === "showInputBarButton") {
     settings.showInputBarButton = target.checked;
+  } else if (key === "showTopToolbarButton") {
+    settings.showTopToolbarButton = target.checked;
   } else if (key === "trackerPlacement") {
     settings.trackerPlacement = target.value === "drawer" ? "drawer" : "dock";
   } else if (key === "autoGenerateInterval") {
@@ -5069,6 +5116,10 @@ function updateSettingFromControl(target, key, immediate) {
   }
   if (key === "showInputBarButton")
     renderChatToolbar();
+  if (key === "showTopToolbarButton") {
+    syncTopToolbarPlacement();
+    renderTopToolbarButton();
+  }
   if (key === "trackerPlacement")
     render();
 }
@@ -5556,6 +5607,99 @@ function renderChildField(child, childIndex, sectionIndex, fieldIndex, options) 
       ${missingFromSchema ? `<div class="scenemap-layout-schema-warning" role="status">Card field “${escapeHtml(child.path)}” no longer exists in this schema.</div>` : ""}
     </div>
   `;
+}
+function syncTopToolbarPlacement() {
+  if (!ctxRef || !hasReceivedInitialState || !state.settings.showTopToolbarButton) {
+    stopTopToolbarObserver();
+    clearTopToolbarInjection();
+    return;
+  }
+  observeTopToolbar();
+  ensureTopToolbarInjection();
+}
+function ensureTopToolbarInjection() {
+  const ctx = ctxRef;
+  if (!ctx || !hasReceivedInitialState || !state.settings.showTopToolbarButton)
+    return;
+  const toolbar = document.querySelector('[class*="chatToolbar"]');
+  if (!toolbar)
+    return;
+  if (topToolbarInjection?.isConnected && topToolbarInjection.parentElement === toolbar)
+    return;
+  clearTopToolbarInjection();
+  topToolbarInjection = ctx.dom.inject(toolbar, '<span class="scenemap-top-toolbar-host"><button type="button" class="scenemap-top-toolbar-btn" data-scenemap-top-toolbar-button></button></span>', "beforeend");
+  topToolbarInjection.addEventListener("click", handleTopToolbarClick);
+  renderTopToolbarButton();
+}
+function renderTopToolbarButton() {
+  if (!state.settings.showTopToolbarButton)
+    return;
+  if (!topToolbarInjection?.isConnected) {
+    scheduleTopToolbarEnsure();
+    return;
+  }
+  const button = topToolbarInjection.querySelector("[data-scenemap-top-toolbar-button]");
+  if (!button)
+    return;
+  const isGenerating = Boolean(state.generationActive || isGenerationRequestPending);
+  const status = getTopToolbarStatus(state, isGenerationRequestPending);
+  const actionLabel = isGenerating ? "Cancel SceneMap generation" : state.latest ? "Regenerate SceneMap" : "Generate SceneMap";
+  const accessibleLabel = `${actionLabel} — ${status.text}`;
+  button.className = `scenemap-top-toolbar-btn is-${status.tone} ${isGenerating ? "is-generating" : ""}`;
+  button.title = accessibleLabel;
+  button.setAttribute("aria-label", accessibleLabel);
+  button.disabled = !state.activeMessageId && !isGenerating;
+  button.innerHTML = `
+    <span class="scenemap-top-toolbar-icon" aria-hidden="true">${isGenerating ? refreshSvg() : iconSvg}</span>
+    <span class="scenemap-top-toolbar-dot" aria-hidden="true"></span>
+  `;
+}
+function handleTopToolbarClick(event) {
+  const button = event.target.closest("[data-scenemap-top-toolbar-button]");
+  if (!button || button.disabled)
+    return;
+  const command = getGenerationButtonCommand(state.generationActive, isGenerationRequestPending);
+  dispatchGeneration({ type: command });
+}
+function observeTopToolbar() {
+  const root = document.querySelector('[class*="chatColumnInner"]') ?? document.querySelector('[class*="chatColumn"]') ?? document.body;
+  if (topToolbarObserver && topToolbarObservationRoot === root && root.isConnected)
+    return;
+  stopTopToolbarObserver();
+  topToolbarObservationRoot = root;
+  topToolbarObserver = new MutationObserver((records) => {
+    if (records.every((record) => record.target instanceof Element && record.target.closest(".scenemap-top-toolbar-host")))
+      return;
+    scheduleTopToolbarEnsure();
+  });
+  topToolbarObserver.observe(root, { childList: true, subtree: true });
+}
+function scheduleTopToolbarEnsure() {
+  if (topToolbarEnsureQueued)
+    return;
+  topToolbarEnsureQueued = true;
+  queueMicrotask(() => {
+    topToolbarEnsureQueued = false;
+    ensureTopToolbarInjection();
+  });
+}
+function clearTopToolbarInjection() {
+  const injection = topToolbarInjection;
+  topToolbarInjection = null;
+  if (!injection)
+    return;
+  injection.removeEventListener("click", handleTopToolbarClick);
+  ctxRef?.dom.uninject(injection);
+}
+function stopTopToolbarObserver() {
+  topToolbarObserver?.disconnect();
+  topToolbarObserver = null;
+  topToolbarObservationRoot = null;
+}
+function destroyTopToolbarButton() {
+  stopTopToolbarObserver();
+  clearTopToolbarInjection();
+  topToolbarEnsureQueued = false;
 }
 function getDisplayOptions(allowCards) {
   const displays = [
@@ -6330,6 +6474,19 @@ var styles = `
 .scenemap-chat-toolbar-btn.is-generating svg { animation: scenemap-spin .9s linear infinite; }
 .scenemap-chat-toolbar-btn:disabled { opacity: .45; cursor: default; }
 .scenemap-chat-toolbar-btn svg { width: 14px; height: 14px; }
+.scenemap-top-toolbar-host { display: inline-flex; align-items: center; }
+.scenemap-top-toolbar-btn { display: inline-flex; align-items: center; justify-content: center; gap: 5px; width: 34px; height: 28px; padding: 0 5px; border: 1px solid transparent; border-radius: var(--lumiverse-radius-sm, 6px); background: transparent; color: var(--lumiverse-text-dim); opacity: .68; cursor: pointer; transition: color var(--lumiverse-transition-fast, .12s ease), background var(--lumiverse-transition-fast, .12s ease), border-color var(--lumiverse-transition-fast, .12s ease), opacity var(--lumiverse-transition-fast, .12s ease); }
+.scenemap-top-toolbar-btn:hover:not(:disabled), .scenemap-top-toolbar-btn:focus-visible { opacity: 1; color: var(--lumiverse-text); background: var(--lumiverse-fill-subtle); border-color: var(--lumiverse-border); outline: none; }
+.scenemap-top-toolbar-btn:focus-visible { box-shadow: 0 0 0 2px var(--lumiverse-primary-020, color-mix(in srgb, var(--lumiverse-primary) 20%, transparent)); }
+.scenemap-top-toolbar-btn:disabled { opacity: .38; cursor: default; }
+.scenemap-top-toolbar-icon { display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; flex: 0 0 auto; }
+.scenemap-top-toolbar-icon svg { width: 14px; height: 14px; }
+.scenemap-top-toolbar-dot { display: block; width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: var(--lumiverse-text-dim); box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 8%, transparent); }
+.scenemap-top-toolbar-btn.is-success .scenemap-top-toolbar-dot { background: var(--lumiverse-success, #22c55e); box-shadow: 0 0 7px color-mix(in srgb, var(--lumiverse-success, #22c55e) 48%, transparent); }
+.scenemap-top-toolbar-btn.is-warning .scenemap-top-toolbar-dot { background: var(--lumiverse-warning, #f59e0b); box-shadow: 0 0 7px color-mix(in srgb, var(--lumiverse-warning, #f59e0b) 48%, transparent); }
+.scenemap-top-toolbar-btn.is-generating { opacity: 1; color: var(--lumiverse-primary, var(--lumiverse-accent)); }
+.scenemap-top-toolbar-btn.is-generating .scenemap-top-toolbar-icon svg { animation: scenemap-spin .9s linear infinite; }
+.scenemap-top-toolbar-btn.is-generating .scenemap-top-toolbar-dot { background: var(--lumiverse-primary, var(--lumiverse-accent)); animation: scenemap-status-pulse 1.2s ease-in-out infinite; box-shadow: 0 0 8px color-mix(in srgb, var(--lumiverse-primary, var(--lumiverse-accent)) 55%, transparent); }
 .scenemap-toolbar, .scenemap-row, .scenemap-modal-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .scenemap-modal-spacer { flex: 1 1 auto; }
 .scenemap-card { border: 1px solid var(--lumiverse-border); background: var(--lumiverse-fill-subtle); border-radius: var(--lumiverse-radius, 8px); padding: 12px; }
@@ -6383,6 +6540,7 @@ var styles = `
 .scenemap-sampler-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .scenemap-sampler-row label { margin-top: 0; }
 .scenemap-settings-shell .scenemap-switch-row { flex-direction: row; align-items: center; justify-content: space-between; gap: 12px; color: var(--lumiverse-text); margin: 0; min-width: 0; }
+.scenemap-interface-switches { display: grid; gap: 10px; margin-top: 10px; }
 .scenemap-interval-field { margin: 0 !important; min-width: 0; }
 .scenemap-switch-row input { position: absolute; opacity: 0; pointer-events: none; }
 .scenemap-switch { position: relative; width: 32px; height: 18px; flex: 0 0 auto; border-radius: var(--lumiverse-radius-md, 10px); background: var(--lumiverse-fill); border: 1px solid var(--lumiverse-border-hover); transition: background .16s ease, border-color .16s ease; }

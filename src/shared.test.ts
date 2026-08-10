@@ -143,6 +143,7 @@ describe("mergeSettings", () => {
 
     expect(settings.temperature).toBeNull();
     expect(settings.topP).toBeNull();
+    expect(settings.showTopToolbarButton).toBe(false);
   });
 
   test("normalizes numeric settings to the values shown and sent", () => {
@@ -188,22 +189,30 @@ describe("split settings persistence", () => {
     const next = mergeAutomaticSettingsPatch(current, {
       temperature: 0.35,
       trackerPlacement: "drawer",
+      showTopToolbarButton: true,
       schemaPreset: "attacker-controlled",
       schemaPresets: {},
     });
 
     expect(next.temperature).toBe(0.35);
     expect(next.trackerPlacement).toBe("drawer");
+    expect(next.showTopToolbarButton).toBe(true);
     expect(next.schemaPreset).toBe(current.schemaPreset);
     expect(next.schemaPresets).toEqual(current.schemaPresets);
   });
 
   test("saving a preset cannot overwrite automatic settings", () => {
-    const current = mergeSettings({ temperature: 0.4, showInputBarButton: false, trackerPlacement: "drawer" });
+    const current = mergeSettings({
+      temperature: 0.4,
+      showInputBarButton: false,
+      showTopToolbarButton: true,
+      trackerPlacement: "drawer",
+    });
     const incoming = mergeSettings({
       ...current,
       temperature: 1.8,
       showInputBarButton: true,
+      showTopToolbarButton: false,
       trackerPlacement: "dock",
       schemaPresets: {
         ...current.schemaPresets,
@@ -218,6 +227,7 @@ describe("split settings persistence", () => {
 
     expect(next.temperature).toBe(0.4);
     expect(next.showInputBarButton).toBe(false);
+    expect(next.showTopToolbarButton).toBe(true);
     expect(next.trackerPlacement).toBe("drawer");
     expect(next.schemaPresets.default.promptJson).toBe("Updated prompt");
   });

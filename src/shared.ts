@@ -39,6 +39,7 @@ export interface SceneMapSettings {
   autoGenerateAiTrackers: boolean;
   autoGenerateInterval: number;
   showInputBarButton: boolean;
+  showTopToolbarButton: boolean;
   trackerPlacement: "dock" | "drawer";
   schemaPreset: string;
   schemaPresets: Record<string, SceneMapPreset>;
@@ -225,6 +226,7 @@ export const defaultSettings: SceneMapSettings = {
   autoGenerateAiTrackers: false,
   autoGenerateInterval: 1,
   showInputBarButton: true,
+  showTopToolbarButton: false,
   trackerPlacement: "dock",
   schemaPreset: "default",
   schemaPresets: {
@@ -273,6 +275,9 @@ export function mergeSettings(value: Partial<SceneMapSettings> | null | undefine
     includeLastXMessages: typeof currentValue.includeLastXMessages === "number" && Number.isFinite(currentValue.includeLastXMessages)
       ? Math.max(0, Math.floor(currentValue.includeLastXMessages))
       : base.includeLastXMessages,
+    showTopToolbarButton: typeof currentValue.showTopToolbarButton === "boolean"
+      ? currentValue.showTopToolbarButton
+      : base.showTopToolbarButton,
     trackerPlacement: currentValue.trackerPlacement === "drawer" ? "drawer" : "dock",
     schemaPresets,
     displayLayout: currentValue.displayLayout?.sections?.length ? currentValue.displayLayout : base.displayLayout,
@@ -304,6 +309,7 @@ export function mergeAutomaticSettingsPatch(currentValue: SceneMapSettings, valu
     next.includeLastXMessages = Math.max(0, Math.floor(patch.includeLastXMessages));
   }
   if (typeof patch.showInputBarButton === "boolean") next.showInputBarButton = patch.showInputBarButton;
+  if (typeof patch.showTopToolbarButton === "boolean") next.showTopToolbarButton = patch.showTopToolbarButton;
   if (patch.trackerPlacement === "dock" || patch.trackerPlacement === "drawer") {
     next.trackerPlacement = patch.trackerPlacement;
   }
