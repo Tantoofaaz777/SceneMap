@@ -20,13 +20,26 @@ import {
 } from "./shared";
 import { SettingsDraftTracker } from "./settings-draft";
 import { AutomaticSettingsDraftTracker } from "./automatic-settings-draft";
-import { validateSchemaDefinition } from "./schema-validator";
+import { validateSchemaDefinition, validateTrackerData } from "./schema-validator";
 import { getGenerationButtonCommand } from "./generation-action";
 import {
   collectRegeneratableFields,
   type RegeneratableField,
 } from "./partial-regeneration";
 import { getTopToolbarStatus } from "./top-toolbar-status";
+import {
+  appendTrackerArrayItem,
+  cloneTrackerEditValue,
+  createTrackerEditDefaultValue,
+  getTrackerEditControlKind,
+  getTrackerSchemaAtPath,
+  getTrackerValueAtPath,
+  parseTrackerEditValue,
+  removeTrackerArrayItem,
+  setTrackerValueAtPath,
+  type TrackerEditControlKind,
+  type TrackerEditPath,
+} from "./tracker-inline-edit";
 
 let state: SceneMapState = {
   settings: defaultSettings,
@@ -62,6 +75,7 @@ let trackerRuntimeError: string | null = null;
 let isGenerationRequestPending = false;
 let generationRequestWatchdog: ReturnType<typeof setTimeout> | null = null;
 let editorRequestSeq = 0;
+let trackerEditRequestSeq = 0;
 let settingsSaveRequestSeq = 0;
 let automaticSaveRequestSeq = 0;
 let drawerSelectHandles: SpindleSelectHandle[] = [];
@@ -71,6 +85,17 @@ let drawerView: "tracker" | "settings" = "settings";
 let appliedTrackerPlacement: SceneMapSettings["trackerPlacement"] | null = null;
 let hasReceivedInitialState = false;
 let regenerationModalHandle: ReturnType<SpindleFrontendContext["ui"]["showModal"]> | null = null;
+
+type TrackerEditSession = {
+  chatId: string;
+  messageId: string;
+  swipeId: number;
+  baseline: unknown;
+  draft: unknown;
+  requestId: string | null;
+};
+
+let trackerEditSession: TrackerEditSession | null = null;
 
 type AutomaticallySavedSetting =
   | "connectionId"
@@ -107,6 +132,7 @@ const iconSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" 
 
 export function setup(ctx: SpindleFrontendContext) {
   hasReceivedInitialState = false;
+  trackerEditSession = null;
   settingsDraft.reset();
   automaticSettingsDraft.reset();
   presetEditorDrafts.clear();
@@ -153,6 +179,7 @@ export function setup(ctx: SpindleFrontendContext) {
       const previousState = state;
       const incomingState = payload.state as SceneMapState;
       hasReceivedInitialState = true;
+      reconcileTrackerEditSession(incomingState, payload);
       if (!settingsDraft.initialized) settingsDraft.initialize(presetSettingsFingerprint(incomingState.settings));
       if (typeof payload.automaticSettingsSaveRequestId === "string") {
         automaticSettingsDraft.acknowledge(payload.automaticSettingsSaveRequestId);
@@ -195,7 +222,10 @@ export function setup(ctx: SpindleFrontendContext) {
       const saveFailed = typeof payload.requestId === "string" && settingsDraft.fail(payload.requestId);
       const automaticSaveFailed = typeof payload.requestId === "string" && automaticSettingsDraft.fail(payload.requestId);
       const pendingEditor = typeof payload.requestId === "string" ? takePendingTextEditor(payload.requestId) : null;
-      if (!saveFailed && !automaticSaveFailed && !pendingEditor) clearGenerationRequestPending();
+      const trackerEditFailed = typeof payload.requestId === "string"
+        && trackerEditSession?.requestId === payload.requestId;
+      if (trackerEditFailed && trackerEditSession) trackerEditSession.requestId = null;
+      if (!saveFailed && !automaticSaveFailed && !pendingEditor && !trackerEditFailed) clearGenerationRequestPending();
       syncSettingsDraftUi();
       renderChatToolbar();
       renderTopToolbarButton();
@@ -262,6 +292,7 @@ export function setup(ctx: SpindleFrontendContext) {
     clearGenerationRequestPending();
     settingsRuntimeError = null;
     trackerRuntimeError = null;
+    trackerEditSession = null;
     settingsDraft.reset();
     presetEditorDrafts.clear();
     automaticSettingsDraft.reset();
@@ -276,6 +307,8 @@ function ensureDockPanel() {
   // collapsed or inactive. The handle, not root.isConnected, owns its lifetime.
   if (dockRootRef && dockPanelHandle) return;
   dockRootRef?.removeEventListener("click", handleClick);
+  dockRootRef?.removeEventListener("change", handleChange);
+  dockRootRef?.removeEventListener("input", handleInput);
   cleanupDockResizeHandles();
   dockPanelHandle?.destroy();
   let panel: ReturnType<SpindleFrontendContext["ui"]["requestDockPanel"]>;
@@ -300,12 +333,16 @@ function ensureDockPanel() {
   dockRootRef = panel.root;
   dockRootRef.classList.add("scenemap-lv", "scenemap-dock-root");
   dockRootRef.addEventListener("click", handleClick);
+  dockRootRef.addEventListener("change", handleChange);
+  dockRootRef.addEventListener("input", handleInput);
   renderDockPanel();
   watchDockResizeHandle();
 }
 
 function destroyDockPanel() {
   dockRootRef?.removeEventListener("click", handleClick);
+  dockRootRef?.removeEventListener("change", handleChange);
+  dockRootRef?.removeEventListener("input", handleInput);
   dockResizeObserver?.disconnect();
   cleanupDockResizeHandles();
   dockPanelHandle?.destroy();
@@ -517,7 +554,10 @@ function renderChatToolbar() {
     return;
   }
   const isGenerating = Boolean(state.generationActive || isGenerationRequestPending);
-  const label = isGenerating ? "Cancel SceneMap generation" : state.latest ? "Regenerate SceneMap" : "Generate SceneMap";
+  const isEditing = Boolean(getCurrentTrackerEditSession());
+  const label = isEditing
+    ? "Save or cancel the tracker edit first"
+    : isGenerating ? "Cancel SceneMap generation" : state.latest ? "Regenerate SceneMap" : "Generate SceneMap";
   const isBehind = !state.latest || state.messagesBehind > 0;
   toolbarRootRef.innerHTML = `
     <button
@@ -526,7 +566,7 @@ function renderChatToolbar() {
       data-action="generate"
       title="${escapeAttr(label)}"
       aria-label="${escapeAttr(label)}"
-      ${state.activeMessageId ? "" : "disabled"}
+      ${state.activeMessageId && !isEditing ? "" : "disabled"}
     >
       ${isGenerating ? refreshSvg() : iconSvg}
     </button>
@@ -597,31 +637,68 @@ function drawerPageMarkup(content: string): string {
 function trackerPanelMarkup(): string {
   const settings = mergeSettings(state.settings);
   const latest = state.latest;
-  const trackerValue = latest?.displayData ?? latest?.data;
+  const schemaMatches = trackerMatchesEffectiveSchema(latest, settings);
+  const editSession = getCurrentTrackerEditSession();
+  const trackerValue = editSession?.draft ?? latest?.displayData ?? latest?.data;
+  const trackerSchema = editSession ? getEffectiveTrackerSchema(settings) : null;
   // Until regeneration, derive a layout from the stored tracker itself. Applying
   // the new preset layout would hide fields from the old schema.
-  const layout = latest && !latest.schemaMatchesCurrent
+  const layout = latest && !schemaMatches
     ? createTrackerDataLayout(trackerValue)
     : getPresetLayout(settings, state.effectivePresetKey);
   return `
     <div class="scenemap-shell">
       <header class="scenemap-header">
-        <button class="scenemap-pill-action scenemap-tracker-action scenemap-primary" data-action="${latest && !state.generationActive && !isGenerationRequestPending ? "choose-regeneration" : "generate"}" ${state.activeMessageId ? "" : "disabled"}>
-          ${state.generationActive || isGenerationRequestPending ? "Cancel" : latest ? "Regenerate" : "Generate"}
-        </button>
-        <button class="scenemap-pill-action scenemap-tracker-action" data-action="edit" ${latest?.schemaMatchesCurrent ? "" : "disabled"}>Edit</button>
-        <button class="scenemap-pill-action scenemap-tracker-action scenemap-danger" data-action="delete" ${latest ? "" : "disabled"}>Delete</button>
+        ${editSession ? `
+          <button class="scenemap-pill-action scenemap-tracker-action scenemap-primary" data-action="save-tracker-edit" ${editSession.requestId ? "disabled" : ""}>${editSession.requestId ? "Saving..." : "Save"}</button>
+          <button class="scenemap-pill-action scenemap-tracker-action" data-action="cancel-tracker-edit" ${editSession.requestId ? "disabled" : ""}>Cancel</button>
+        ` : `
+          <button class="scenemap-pill-action scenemap-tracker-action scenemap-primary" data-action="${latest && !state.generationActive && !isGenerationRequestPending ? "choose-regeneration" : "generate"}" ${state.activeMessageId ? "" : "disabled"}>
+            ${state.generationActive || isGenerationRequestPending ? "Cancel" : latest ? "Regenerate" : "Generate"}
+          </button>
+          <button class="scenemap-pill-action scenemap-tracker-action" data-action="edit" ${schemaMatches && !state.generationActive && !isGenerationRequestPending ? "" : "disabled"}>Edit</button>
+          <button class="scenemap-pill-action scenemap-tracker-action scenemap-danger" data-action="delete" ${latest ? "" : "disabled"}>Delete</button>
+        `}
       </header>
 
       ${trackerRuntimeError ? `<div class="scenemap-runtime-error" role="alert" data-tracker-runtime-error>${escapeHtml(trackerRuntimeError)}</div>` : ""}
 
       <p class="scenemap-status is-${statusTone()}" role="status" aria-live="polite">${statusMarkup()}</p>
 
-      <section class="scenemap-card scenemap-board">
-        ${latest ? renderTracker(trackerValue, layout) : `<div class="scenemap-empty">Generate a SceneMap for this swipe</div>`}
+      <section class="scenemap-card scenemap-board ${editSession ? "is-editing" : ""}">
+        ${latest ? renderTracker(trackerValue, layout, trackerSchema) : `<div class="scenemap-empty">Generate a SceneMap for this swipe</div>`}
       </section>
     </div>
   `;
+}
+
+function getEffectiveTrackerSchema(settings = mergeSettings(state.settings)): Record<string, unknown> {
+  return settings.schemaPresets[state.effectivePresetKey]?.value
+    ?? settings.schemaPresets[settings.schemaPreset]?.value
+    ?? settings.schemaPresets.default.value;
+}
+
+function trackerMatchesEffectiveSchema(
+  latest = state.latest,
+  settings = mergeSettings(state.settings),
+): boolean {
+  return Boolean(latest?.schemaHash && latest.schemaHash === schemaFingerprint(getEffectiveTrackerSchema(settings)));
+}
+
+function getCurrentTrackerEditSession(): TrackerEditSession | null {
+  const latest = state.latest;
+  if (
+    !trackerEditSession
+    || !latest
+    || state.chatId !== trackerEditSession.chatId
+    || latest.messageId !== trackerEditSession.messageId
+    || latest.swipeId !== trackerEditSession.swipeId
+    || !trackerMatchesEffectiveSchema(latest)
+  ) {
+    trackerEditSession = null;
+    return null;
+  }
+  return trackerEditSession;
 }
 
 function renderDrawerSettings() {
@@ -903,6 +980,7 @@ function restoreScrollPositions(snapshots: ElementScrollSnapshot[]) {
 function statusText(): string {
   if (!state.chatId) return "Open a chat to start tracking";
   if (isMappingScene()) return "Mapping this scene";
+  if (getCurrentTrackerEditSession()) return "Editing tracker — save or cancel your changes";
   if (state.latest && !state.latest.schemaMatchesCurrent) return "Schema changed — regenerate to update";
   const autoText = autoGenerateStatusText();
   if (autoText) return autoText;
@@ -926,6 +1004,7 @@ function isMappingScene(): boolean {
 function statusTone(): SceneMapStatusTone {
   if (!state.chatId) return "neutral";
   if (isMappingScene()) return "generating";
+  if (getCurrentTrackerEditSession()) return "info";
   if (state.latest && !state.latest.schemaMatchesCurrent) return "warning";
   if (state.settings.autoGenerateAiTrackers && state.autoGenerateMessagesRemaining != null) {
     return state.autoGenerateMessagesRemaining <= 0 ? "warning" : "info";
@@ -962,14 +1041,11 @@ function handleClick(event: Event) {
     dispatchGeneration({ type: command });
   }
   if (action === "choose-regeneration") openRegenerationModal();
-  if (action === "edit" && state.latest?.schemaMatchesCurrent && state.chatId) {
-    clearTrackerRuntimeError();
-    const { messageId, swipeId, data: trackerData } = state.latest;
-    const chatId = state.chatId;
-    openJsonEditor("Edit Tracker JSON", trackerData, (data) => {
-      send({ type: "edit_tracker", chatId, messageId, swipeId, data });
-    });
-  }
+  if (action === "edit") startTrackerEdit();
+  if (action === "save-tracker-edit") saveTrackerEdit();
+  if (action === "cancel-tracker-edit") cancelTrackerEdit();
+  if (action === "add-tracker-card") addTrackerEditCard(button);
+  if (action === "remove-tracker-card") removeTrackerEditCard(button);
   if (action === "delete" && state.latest) void confirmDeleteTracker();
   if (action === "create-preset" && ensureActivePresetEditorValid() && ensureCurrentPresetLayoutValid()) createPreset();
   if (action === "rename-preset") renamePreset();
@@ -984,6 +1060,119 @@ function handleClick(event: Event) {
     if (!settingsDraft.beginSave(requestId)) return;
     renderDrawerSettings();
     send({ type: "save_preset_settings", requestId, settings: state.settings });
+  }
+}
+
+function startTrackerEdit() {
+  const latest = state.latest;
+  const chatId = state.chatId;
+  if (!latest || !trackerMatchesEffectiveSchema(latest) || !chatId || state.generationActive || isGenerationRequestPending) return;
+  clearTrackerRuntimeError();
+  trackerEditSession = {
+    chatId,
+    messageId: latest.messageId,
+    swipeId: latest.swipeId,
+    baseline: cloneTrackerEditValue(latest.data),
+    draft: cloneTrackerEditValue(latest.data),
+    requestId: null,
+  };
+  renderTrackerEditSurface({ focusFirstControl: true });
+  renderChatToolbar();
+  renderTopToolbarButton();
+}
+
+function saveTrackerEdit() {
+  const session = getCurrentTrackerEditSession();
+  if (!session || session.requestId) return;
+  clearTrackerRuntimeError();
+  try {
+    const validated = validateTrackerData(session.draft, getEffectiveTrackerSchema(), "Edited tracker");
+    session.draft = cloneTrackerEditValue(validated);
+  } catch (error) {
+    showTrackerError((error as Error).message);
+    return;
+  }
+  const requestId = `tracker-edit-${Date.now()}-${++trackerEditRequestSeq}`;
+  session.requestId = requestId;
+  renderTrackerEditSurface();
+  send({
+    type: "edit_tracker",
+    requestId,
+    chatId: session.chatId,
+    messageId: session.messageId,
+    swipeId: session.swipeId,
+    expectedData: session.baseline,
+    data: session.draft,
+  });
+}
+
+function cancelTrackerEdit() {
+  const session = getCurrentTrackerEditSession();
+  if (!session || session.requestId) return;
+  trackerEditSession = null;
+  clearTrackerRuntimeError();
+  renderTrackerEditSurface();
+  renderChatToolbar();
+  renderTopToolbarButton();
+}
+
+function addTrackerEditCard(button: HTMLElement) {
+  const session = getCurrentTrackerEditSession();
+  if (!session || session.requestId) return;
+  const path = readTrackerEditPath(button.dataset.editPath);
+  const itemSchema = path ? getTrackerSchemaAtPath(getEffectiveTrackerSchema(), [...path, 0]) : null;
+  if (!path || !itemSchema || !appendTrackerArrayItem(session.draft, path, createTrackerEditDefaultValue(itemSchema))) return;
+  renderTrackerEditSurface();
+}
+
+function removeTrackerEditCard(button: HTMLElement) {
+  const session = getCurrentTrackerEditSession();
+  if (!session || session.requestId) return;
+  const path = readTrackerEditPath(button.dataset.editPath);
+  const index = Number(button.dataset.editIndex);
+  if (!path || !Number.isSafeInteger(index) || !removeTrackerArrayItem(session.draft, path, index)) return;
+  renderTrackerEditSurface();
+}
+
+function renderTrackerEditSurface(options: { focusFirstControl?: boolean } = {}) {
+  const root = mergeSettings(state.settings).trackerPlacement === "drawer" ? rootRef : dockRootRef;
+  const scrollSnapshot = root ? captureScrollPositions(root) : [];
+  if (drawerScrollRestoreFrame !== null) cancelAnimationFrame(drawerScrollRestoreFrame);
+  drawerScrollRestoreFrame = null;
+  renderTrackerSurfaces();
+  restoreScrollPositions(scrollSnapshot);
+  drawerScrollRestoreFrame = requestAnimationFrame(() => {
+    drawerScrollRestoreFrame = null;
+    restoreScrollPositions(scrollSnapshot);
+    if (options.focusFirstControl) {
+      const currentRoot = mergeSettings(state.settings).trackerPlacement === "drawer" ? rootRef : dockRootRef;
+      currentRoot?.querySelector<HTMLElement>("[data-tracker-edit-control]")?.focus();
+    }
+  });
+}
+
+function reconcileTrackerEditSession(incomingState: SceneMapState, payload: any) {
+  const session = trackerEditSession;
+  if (!session) return;
+  if (typeof payload?.trackerEditRequestId === "string" && payload.trackerEditRequestId === session.requestId) {
+    trackerEditSession = null;
+    trackerRuntimeError = null;
+    return;
+  }
+  const latest = incomingState.latest;
+  if (
+    incomingState.chatId !== session.chatId
+    || !latest
+    || latest.messageId !== session.messageId
+    || latest.swipeId !== session.swipeId
+    || !latest.schemaMatchesCurrent
+  ) {
+    trackerEditSession = null;
+    return;
+  }
+  if (!jsonValuesEqual(latest.data, session.baseline)) {
+    trackerEditSession = null;
+    trackerRuntimeError = "This tracker changed while it was being edited. Open Edit again to use the newest values.";
   }
 }
 
@@ -1428,6 +1617,10 @@ function ensureCurrentPresetLayoutValid(): boolean {
 
 function handleChange(event: Event) {
   const target = event.target as HTMLInputElement | HTMLSelectElement;
+  if (target.dataset.trackerEditControl) {
+    updateTrackerEditControl(target);
+    return;
+  }
   const key = target.dataset.setting;
   if (!isAutomaticallySavedSetting(key)) return;
   updateSettingFromControl(target, key, true);
@@ -1435,6 +1628,10 @@ function handleChange(event: Event) {
 
 function handleInput(event: Event) {
   const target = event.target as HTMLInputElement | HTMLTextAreaElement;
+  if (target.dataset.trackerEditControl) {
+    updateTrackerEditControl(target);
+    return;
+  }
   if (target.dataset.presetEditor) {
     updatePresetEditorControl(target);
     return;
@@ -1442,6 +1639,36 @@ function handleInput(event: Event) {
   const key = target.dataset.setting;
   if (!isAutomaticallySavedSetting(key) || target.type === "checkbox") return;
   updateSettingFromControl(target as HTMLInputElement, key, false);
+}
+
+function updateTrackerEditControl(target: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement) {
+  const session = getCurrentTrackerEditSession();
+  if (!session || session.requestId) return;
+  const path = readTrackerEditPath(target.dataset.editPath);
+  const kind = target.dataset.editKind as TrackerEditControlKind | undefined;
+  if (!path || !kind) return;
+  const schema = getTrackerSchemaAtPath(getEffectiveTrackerSchema(), path);
+  const value = parseTrackerEditValue(kind, target.value, schema);
+  if (!setTrackerValueAtPath(session.draft, path, value)) {
+    showTrackerError("This field cannot be edited safely.");
+  }
+}
+
+function readTrackerEditPath(value: string | undefined): TrackerEditPath | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed)) return null;
+    return parsed.every((part) => typeof part === "string" || (Number.isSafeInteger(part) && part >= 0))
+      ? parsed as TrackerEditPath
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function trackerEditPathAttr(path: TrackerEditPath): string {
+  return escapeAttr(JSON.stringify(path));
 }
 
 function isAutomaticallySavedSetting(key: string | undefined): key is AutomaticallySavedSetting {
@@ -2038,15 +2265,18 @@ function renderTopToolbarButton() {
   const button = topToolbarInjection.querySelector<HTMLButtonElement>("[data-scenemap-top-toolbar-button]");
   if (!button) return;
   const isGenerating = Boolean(state.generationActive || isGenerationRequestPending);
+  const isEditing = Boolean(getCurrentTrackerEditSession());
   const status = getTopToolbarStatus(state, isGenerationRequestPending);
-  const actionLabel = isGenerating
+  const actionLabel = isEditing
+    ? "Save or cancel the tracker edit first"
+    : isGenerating
     ? "Cancel SceneMap generation"
     : state.latest ? "Regenerate SceneMap" : "Generate SceneMap";
   const accessibleLabel = `${actionLabel} — ${status.text}`;
   button.className = `scenemap-top-toolbar-btn is-${status.tone} ${isGenerating ? "is-generating" : ""}`;
   button.title = accessibleLabel;
   button.setAttribute("aria-label", accessibleLabel);
-  button.disabled = !state.activeMessageId && !isGenerating;
+  button.disabled = isEditing || (!state.activeMessageId && !isGenerating);
   button.innerHTML = `
     <span class="scenemap-top-toolbar-dot" aria-hidden="true"></span>
     <span class="scenemap-top-toolbar-icon" aria-hidden="true">${isGenerating ? refreshSvg() : iconSvg}</span>
@@ -2679,14 +2909,6 @@ function layoutIcon(name: "plus" | "grip" | "grip-horizontal" | "trash"): string
   return `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name]}</svg>`;
 }
 
-function openJsonEditor(title: string, value: unknown, onSave: (data: unknown) => void) {
-  openTextEditor(title, JSON.stringify(value, null, 2), (text) => {
-    const data = JSON.parse(text);
-    if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("JSON must be an object.");
-    onSave(data);
-  });
-}
-
 function openTextEditor(
   title: string,
   value: string,
@@ -2781,13 +3003,22 @@ function showSettingsError(message: string) {
   if (!preserveActiveSettings || !mountSettingsRuntimeError(message)) renderDrawerSettings();
 }
 
-function renderTracker(value: unknown, layout: TrackerBoardDisplayLayout): string {
+function renderTracker(
+  value: unknown,
+  layout: TrackerBoardDisplayLayout,
+  editSchema: Record<string, unknown> | null = null,
+): string {
   const record = getRecord(value);
   if (Object.keys(record).length === 0) return `<div class="scenemap-empty">Tracker data is empty.</div>`;
   const sections = layout?.sections?.length ? layout.sections : DEFAULT_DISPLAY_LAYOUT.sections;
   const html = sections
     .map((section) => {
-      const fields = section.fields.map((field) => renderField(field, record)).filter(Boolean).join("");
+      const fields = section.fields
+        .map((field) => editSchema
+          ? renderEditableField(field, record, editSchema, [])
+          : renderField(field, record))
+        .filter(Boolean)
+        .join("");
       if (!fields) return "";
       const title = section.title?.trim();
       return `<section class="scenemap-section ${title ? "" : "scenemap-section--untitled"}">${title ? `<h3>${escapeHtml(title)}</h3>` : ""}<div>${fields}</div></section>`;
@@ -2795,6 +3026,103 @@ function renderTracker(value: unknown, layout: TrackerBoardDisplayLayout): strin
     .filter(Boolean)
     .join("");
   return html || `<div class="scenemap-empty">Tracker data is empty.</div>`;
+}
+
+function renderEditableField(
+  field: TrackerBoardField,
+  draft: Record<string, unknown>,
+  rootSchema: Record<string, unknown>,
+  basePath: TrackerEditPath,
+): string {
+  const path = [...basePath, ...field.path.split(".").filter(Boolean)];
+  const value = getTrackerValueAtPath(draft, path);
+  const label = getFieldLabel(field);
+  const display = field.display || "text";
+  if (display === "character_cards") {
+    const cards = Array.isArray(value) ? value : [];
+    return `
+      <div class="scenemap-edit-card-list">
+        <div class="scenemap-character-grid">
+          ${cards.map((_, index) => renderEditableCharacterCard(draft, index, field, path, rootSchema)).join("")}
+        </div>
+        <button type="button" class="scenemap-edit-add-card" data-action="add-tracker-card" data-edit-path="${trackerEditPathAttr(path)}">+ Add item</button>
+      </div>
+    `;
+  }
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return `<div class="scenemap-field">${label ? `<span>${escapeHtml(label)}</span>` : ""}<p>${escapeHtml(formatDisplayValue(value))}</p></div>`;
+  }
+  return renderTrackerEditControl(path, label, display, value, rootSchema);
+}
+
+function renderEditableCharacterCard(
+  draft: Record<string, unknown>,
+  index: number,
+  parentField: TrackerBoardField,
+  parentPath: TrackerEditPath,
+  rootSchema: Record<string, unknown>,
+): string {
+  const itemPath = [...parentPath, index];
+  const record = getRecord(getTrackerValueAtPath(draft, itemPath));
+  const namePath = [...itemPath, "name"];
+  const nameSchema = getTrackerSchemaAtPath(rootSchema, namePath);
+  const hasEditableName = Object.keys(nameSchema).length > 0 || Object.prototype.hasOwnProperty.call(record, "name");
+  const fallbackFields = Object.keys(record)
+    .filter((key) => key !== "name")
+    .map((key): TrackerBoardField => ({
+      path: key,
+      label: humanizeTrackerKey(key),
+      display: key === "postureAndInteraction" ? "mono" : "text",
+    }));
+  const fields = (parentField.fields?.length ? parentField.fields : fallbackFields)
+    .filter((field) => !(hasEditableName && field.path === "name"));
+  return `
+    <article class="scenemap-character scenemap-character-edit">
+      <div class="scenemap-character-edit-header">
+        ${hasEditableName
+          ? renderTrackerEditControl(namePath, "Character name", "text", record.name, rootSchema, true)
+          : `<h4>${escapeHtml(`Item ${index + 1}`)}</h4>`}
+        <button type="button" class="scenemap-icon-btn scenemap-edit-remove-card" data-action="remove-tracker-card" data-edit-path="${trackerEditPathAttr(parentPath)}" data-edit-index="${index}" title="Remove item" aria-label="Remove item">${layoutIcon("trash")}</button>
+      </div>
+      ${fields.map((field) => renderEditableField(field, draft, rootSchema, itemPath)).join("")}
+    </article>
+  `;
+}
+
+function renderTrackerEditControl(
+  path: TrackerEditPath,
+  label: string | null,
+  display: TrackerFieldDisplay,
+  value: unknown,
+  rootSchema: Record<string, unknown>,
+  characterName = false,
+): string {
+  const schema = getTrackerSchemaAtPath(rootSchema, path);
+  const kind = getTrackerEditControlKind(schema, value);
+  const labelMarkup = label ? `<span>${escapeHtml(label)}</span>` : "";
+  const common = `data-tracker-edit-control="true" data-edit-path="${trackerEditPathAttr(path)}" data-edit-kind="${kind}" aria-label="${escapeAttr(label || humanizeTrackerKey(String(path.at(-1) ?? "Value")))}"`;
+  let control: string;
+  if (kind === "enum") {
+    const options = Array.isArray(schema.enum) ? schema.enum : [];
+    control = `<select ${common}>${options.map((option, index) => `<option value="${index}" ${jsonValuesEqual(option, value) ? "selected" : ""}>${escapeHtml(formatDisplayValue(option))}</option>`).join("")}</select>`;
+  } else if (kind === "boolean") {
+    control = `<select ${common}><option value="true" ${value === true ? "selected" : ""}>Yes</option><option value="false" ${value !== true ? "selected" : ""}>No</option></select>`;
+  } else if (kind === "number" || kind === "integer") {
+    const minimum = typeof schema.minimum === "number" ? ` min="${schema.minimum}"` : "";
+    const maximum = typeof schema.maximum === "number" ? ` max="${schema.maximum}"` : "";
+    control = `<input type="number" ${common}${minimum}${maximum} step="${kind === "integer" ? "1" : "any"}" value="${escapeAttr(value ?? "")}">`;
+  } else if (kind.endsWith("_array")) {
+    const lines = Array.isArray(value) ? value.map(formatDisplayValue).join("\n") : "";
+    control = `<textarea ${common} rows="${Math.max(2, Math.min(5, Array.isArray(value) ? value.length : 2))}" placeholder="One item per line">${escapeHtml(lines)}</textarea>`;
+  } else if (display === "mono" || (typeof value === "string" && (value.length > 64 || value.includes("\n")))) {
+    control = `<textarea ${common} rows="${typeof value === "string" && value.length > 180 ? 4 : 3}">${escapeHtml(value ?? "")}</textarea>`;
+  } else {
+    control = `<input type="text" ${common} value="${escapeAttr(value ?? "")}">`;
+  }
+  if (characterName) {
+    return `<label class="scenemap-character-name-edit">${labelMarkup}${control}</label>`;
+  }
+  return `<label class="scenemap-field scenemap-edit-field">${labelMarkup}${control}</label>`;
 }
 
 function createTrackerDataLayout(value: unknown): TrackerBoardDisplayLayout {
@@ -3036,6 +3364,20 @@ const styles = `
 .scenemap-character-grid { display: flex; flex-direction: column; gap: 14px; }
 .scenemap-character { border: 1px solid var(--lumiverse-primary-020, var(--lumiverse-border)); background: color-mix(in srgb, var(--lumiverse-fill) 82%, var(--lumiverse-primary, var(--lumiverse-accent)) 6%); border-radius: var(--lumiverse-radius, 8px); padding: 10px; }
 .scenemap-character h4 { margin: 0 0 10px; color: color-mix(in srgb, var(--lumiverse-text) 72%, var(--lumiverse-primary, var(--lumiverse-accent)) 28%); font-size: 14px; font-weight: 760; }
+.scenemap-board.is-editing { border-color: color-mix(in srgb, var(--lumiverse-primary, var(--lumiverse-accent)) 24%, transparent); }
+.scenemap-edit-field > input, .scenemap-edit-field > textarea, .scenemap-edit-field > select, .scenemap-character-name-edit > input, .scenemap-character-name-edit > textarea, .scenemap-character-name-edit > select { width: 100%; box-sizing: border-box; border: 1px solid var(--lumiverse-border); border-radius: var(--lumiverse-radius-sm, 5px); background: var(--lumiverse-secondary, rgba(128, 128, 128, .15)); color: var(--lumiverse-text); padding: 8px 9px; font: inherit; font-size: 13px; line-height: 1.4; }
+.scenemap-edit-field > textarea { min-height: 62px; resize: vertical; }
+.scenemap-edit-field > select, .scenemap-character-name-edit > select { appearance: auto; }
+.scenemap-edit-field > input:focus, .scenemap-edit-field > textarea:focus, .scenemap-edit-field > select:focus, .scenemap-character-name-edit > input:focus, .scenemap-character-name-edit > textarea:focus, .scenemap-character-name-edit > select:focus { outline: none; border-color: var(--lumiverse-primary, var(--lumiverse-accent)); box-shadow: 0 0 0 1px var(--lumiverse-primary-020, transparent); }
+.scenemap-character-edit { display: flex; flex-direction: column; }
+.scenemap-character-edit-header { display: flex; align-items: flex-end; gap: 8px; margin-bottom: 10px; }
+.scenemap-character-name-edit { display: flex; flex: 1 1 auto; min-width: 0; flex-direction: column; gap: 4px; }
+.scenemap-character-name-edit > span { color: var(--lumiverse-text-muted); font-size: 10px; font-weight: 700; text-transform: uppercase; }
+.scenemap-character-name-edit > input { color: color-mix(in srgb, var(--lumiverse-text) 72%, var(--lumiverse-primary, var(--lumiverse-accent)) 28%); font-size: 14px; font-weight: 760; }
+.scenemap-lv .scenemap-edit-remove-card { flex: 0 0 auto; width: 34px; height: 34px; color: var(--lumiverse-danger, #ef4444); }
+.scenemap-edit-card-list { display: flex; flex-direction: column; gap: 10px; }
+.scenemap-lv .scenemap-edit-add-card { width: 100%; padding: 8px 10px; border-style: dashed; color: var(--lumiverse-text-muted); background: transparent; }
+.scenemap-lv .scenemap-edit-add-card:hover:not(:disabled) { color: var(--lumiverse-primary, var(--lumiverse-accent)); border-color: var(--lumiverse-primary, var(--lumiverse-accent)); }
 .scenemap-drawer-scroll { flex: 0 0 auto; min-height: 0; overflow: visible; box-sizing: border-box; padding: 14px; }
 .scenemap-drawer-view { min-height: 0; }
 .scenemap-drawer-view > .scenemap-shell { flex: none; min-height: 0; overflow: visible; padding: 14px 0 0; }

@@ -1073,7 +1073,15 @@ async function maybeAutoGenerateTracker(messageId: string | null | undefined, us
   }
 }
 
-async function editTracker(chatId: string, messageId: string, swipeId: number, data: unknown, userId?: string) {
+async function editTracker(
+  chatId: string,
+  messageId: string,
+  swipeId: number,
+  data: unknown,
+  expectedData: unknown,
+  requestId: string,
+  userId?: string,
+) {
   if (!userId) throw new Error("SceneMap needs a user context before editing a tracker.");
   if (!chatId) throw new Error("Tracker chat is missing.");
   const chat = await spindle.chats.get(chatId, userId);
@@ -1095,6 +1103,11 @@ async function editTracker(chatId: string, messageId: string, swipeId: number, d
   if (!storedTracker || storedTracker.schemaHash !== currentSchemaHash) {
     throw new Error("This tracker was generated with another or unknown schema. Regenerate it before editing.");
   }
+  // Inline editing starts from a snapshot. Refuse to overwrite a regeneration or
+  // another edit that changed the stored tracker while the form was open.
+  if (!jsonValuesEqual(storedTracker.value, expectedData)) {
+    throw new Error("This tracker changed while it was being edited. Reopen Edit and try again.");
+  }
   const validatedData = validateTrackerData(data, preset.value);
   await spindle.chat.updateMessage(chatId, messageId, {
     metadata: mergeTrackerMetadata(message.metadata, validatedData, swipeId, {
@@ -1103,7 +1116,7 @@ async function editTracker(chatId: string, messageId: string, swipeId: number, d
     }),
   });
   spindle.toast.success("Tracker saved.", { title: "SceneMap", userId });
-  await pushState(userId);
+  await pushState(userId, { trackerEditRequestId: requestId });
 }
 
 async function deleteTracker(messageId: string, userId?: string) {
@@ -1180,7 +1193,15 @@ spindle.onFrontendMessage(async (payload: any, userId?: string) => {
         cancelTrackerGeneration(userId);
         break;
       case "edit_tracker":
-        await editTracker(payload.chatId, payload.messageId, payload.swipeId, payload.data, userId);
+        await editTracker(
+          payload.chatId,
+          payload.messageId,
+          payload.swipeId,
+          payload.data,
+          payload.expectedData,
+          typeof payload.requestId === "string" ? payload.requestId : "",
+          userId,
+        );
         break;
       case "delete_tracker":
         await deleteTracker(payload.messageId, userId);

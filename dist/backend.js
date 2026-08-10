@@ -3084,7 +3084,7 @@ async function maybeAutoGenerateTracker(messageId, userId) {
     await pushState(userId);
   }
 }
-async function editTracker(chatId, messageId, swipeId, data, userId) {
+async function editTracker(chatId, messageId, swipeId, data, expectedData, requestId, userId) {
   if (!userId)
     throw new Error("SceneMap needs a user context before editing a tracker.");
   if (!chatId)
@@ -3109,6 +3109,9 @@ async function editTracker(chatId, messageId, swipeId, data, userId) {
   if (!storedTracker || storedTracker.schemaHash !== currentSchemaHash) {
     throw new Error("This tracker was generated with another or unknown schema. Regenerate it before editing.");
   }
+  if (!jsonValuesEqual(storedTracker.value, expectedData)) {
+    throw new Error("This tracker changed while it was being edited. Reopen Edit and try again.");
+  }
   const validatedData = validateTrackerData(data, preset.value);
   await spindle.chat.updateMessage(chatId, messageId, {
     metadata: mergeTrackerMetadata(message.metadata, validatedData, swipeId, {
@@ -3117,7 +3120,7 @@ async function editTracker(chatId, messageId, swipeId, data, userId) {
     })
   });
   spindle.toast.success("Tracker saved.", { title: "SceneMap", userId });
-  await pushState(userId);
+  await pushState(userId, { trackerEditRequestId: requestId });
 }
 async function deleteTracker(messageId, userId) {
   if (!userId)
@@ -3196,7 +3199,7 @@ spindle.onFrontendMessage(async (payload, userId) => {
         cancelTrackerGeneration(userId);
         break;
       case "edit_tracker":
-        await editTracker(payload.chatId, payload.messageId, payload.swipeId, payload.data, userId);
+        await editTracker(payload.chatId, payload.messageId, payload.swipeId, payload.data, payload.expectedData, typeof payload.requestId === "string" ? payload.requestId : "", userId);
         break;
       case "delete_tracker":
         await deleteTracker(payload.messageId, userId);

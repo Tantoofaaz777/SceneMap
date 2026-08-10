@@ -3619,6 +3619,21 @@ function validateSchemaDefinition(schema) {
     throw new Error(`SceneMap schema is invalid: ${error.message}`);
   }
 }
+function validateTrackerData(data, schema, source = "Tracker data") {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error(`${source} must be a JSON object.`);
+  }
+  let result;
+  try {
+    result = createValidator(schema).validate(data);
+  } catch (error) {
+    throw new Error(`SceneMap schema is invalid: ${error.message}`);
+  }
+  if (!result.valid) {
+    throw new Error(`${source} does not match the SceneMap schema: ${formatSchemaErrors(result.errors)}`);
+  }
+  return data;
+}
 function createValidator(schema) {
   assertSchemaWellFormed(schema);
   return new Validator(schema, detectDraft(schema), false);
@@ -3691,6 +3706,33 @@ function assertSchemaWellFormed(schema, path = "#", seen = new WeakSet) {
       assertSchemaWellFormed(child, `${path}/${keyword}`, seen);
     }
   }
+}
+function formatSchemaErrors(errors) {
+  const meaningful = errors.filter((error) => !["properties", "items"].includes(error.keyword));
+  const selected = (meaningful.length > 0 ? meaningful : errors).slice(0, 6);
+  const messages = selected.map((error) => {
+    let path = error.instanceLocation === "#" ? "" : error.instanceLocation.replace(/^#/, "");
+    let message = error.error;
+    if (error.keyword === "required") {
+      const match = message.match(/required property "([^"]+)"/i);
+      if (match)
+        path = `${path}/${escapeJsonPointerToken(match[1])}`;
+    }
+    if (error.keyword === "type") {
+      const match = message.match(/Expected "([^"]+)"/i);
+      if (match)
+        message = `must be ${match[1]}`;
+    }
+    if (error.keyword === "format") {
+      const match = message.match(/format "([^"]+)"/i);
+      if (match)
+        message = `must match format "${match[1]}"`;
+    }
+    return `${path || "/"} ${message}`;
+  });
+  if (errors.length > selected.length)
+    messages.push(`and ${errors.length - selected.length} more`);
+  return messages.join("; ");
 }
 function escapeJsonPointerToken(value) {
   return value.replaceAll("~", "~0").replaceAll("/", "~1");
@@ -3767,6 +3809,204 @@ function getTopToolbarStatus(state, requestPending = false) {
   return { tone: "success", text: "SceneMap is updated" };
 }
 
+// src/tracker-inline-edit.ts
+var blockedPathKeys = new Set(["__proto__", "prototype", "constructor"]);
+function getRecord2(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+function decodeRefToken(token) {
+  return token.replaceAll("~1", "/").replaceAll("~0", "~");
+}
+function resolveLocalRef(rootSchema, ref) {
+  if (!ref.startsWith("#/"))
+    return null;
+  let current = rootSchema;
+  for (const token of ref.slice(2).split("/")) {
+    if (!current || typeof current !== "object" || Array.isArray(current))
+      return null;
+    current = current[decodeRefToken(token)];
+  }
+  return current;
+}
+function mergeSchemas(left, right) {
+  const leftProperties = getRecord2(left.properties);
+  const rightProperties = getRecord2(right.properties);
+  return {
+    ...left,
+    ...right,
+    ...Object.keys(leftProperties).length || Object.keys(rightProperties).length ? { properties: { ...leftProperties, ...rightProperties } } : {}
+  };
+}
+function normalizeSchema(schema, rootSchema, seenRefs = new Set) {
+  const source = getRecord2(schema);
+  let normalized = { ...source };
+  const ref = typeof source.$ref === "string" ? source.$ref : null;
+  if (ref?.startsWith("#/") && !seenRefs.has(ref)) {
+    const resolved = resolveLocalRef(rootSchema, ref);
+    if (resolved) {
+      const nextRefs = new Set(seenRefs).add(ref);
+      normalized = mergeSchemas(normalizeSchema(resolved, rootSchema, nextRefs), normalized);
+    }
+  }
+  for (const keyword of ["allOf", "oneOf", "anyOf"]) {
+    const variants = source[keyword];
+    if (!Array.isArray(variants))
+      continue;
+    for (const variant of variants) {
+      normalized = mergeSchemas(normalized, normalizeSchema(variant, rootSchema, seenRefs));
+    }
+  }
+  return normalized;
+}
+function schemaType(schema) {
+  if (typeof schema.type === "string")
+    return schema.type;
+  if (Array.isArray(schema.type)) {
+    return schema.type.find((type) => typeof type === "string" && type !== "null") ?? null;
+  }
+  return null;
+}
+function getTrackerSchemaAtPath(rootSchema, path) {
+  let current = rootSchema;
+  for (const segment of path) {
+    const normalized = normalizeSchema(current, rootSchema);
+    if (typeof segment === "number") {
+      current = normalized.items;
+      continue;
+    }
+    current = getRecord2(normalized.properties)[segment];
+  }
+  return normalizeSchema(current, rootSchema);
+}
+function getTrackerEditControlKind(schema, value) {
+  if (Array.isArray(schema.enum) && schema.enum.length > 0)
+    return "enum";
+  const type = schemaType(schema);
+  if (type === "boolean" || typeof value === "boolean")
+    return "boolean";
+  if (type === "integer")
+    return "integer";
+  if (type === "number" || typeof value === "number")
+    return "number";
+  if (type === "array" || Array.isArray(value)) {
+    const itemSchema = normalizeSchema(schema.items, schema);
+    const itemType = schemaType(itemSchema);
+    if (itemType === "integer")
+      return "integer_array";
+    if (itemType === "number")
+      return "number_array";
+    const sample = Array.isArray(value) ? value.find((item) => item !== null && item !== undefined) : undefined;
+    if (typeof sample === "number")
+      return Number.isInteger(sample) ? "integer_array" : "number_array";
+    return "string_array";
+  }
+  return "string";
+}
+function parseNumericValue(raw, integer) {
+  if (raw.trim() === "")
+    return "";
+  const value = Number(raw);
+  if (!Number.isFinite(value) || integer && !Number.isInteger(value))
+    return raw;
+  return value;
+}
+function parseTrackerEditValue(kind, raw, schema) {
+  if (kind === "enum") {
+    const index2 = Number(raw);
+    return Number.isSafeInteger(index2) && Array.isArray(schema.enum) && index2 >= 0 && index2 < schema.enum.length ? structuredClone(schema.enum[index2]) : raw;
+  }
+  if (kind === "boolean")
+    return raw === "true";
+  if (kind === "number")
+    return parseNumericValue(raw, false);
+  if (kind === "integer")
+    return parseNumericValue(raw, true);
+  if (kind.endsWith("_array")) {
+    const values = raw.split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+    if (kind === "number_array")
+      return values.map((item) => parseNumericValue(item, false));
+    if (kind === "integer_array")
+      return values.map((item) => parseNumericValue(item, true));
+    return values;
+  }
+  return raw;
+}
+function setTrackerValueAtPath(root, path, value) {
+  if (!root || typeof root !== "object" || path.length === 0)
+    return false;
+  let current = root;
+  for (let index2 = 0;index2 < path.length - 1; index2 += 1) {
+    const segment = path[index2];
+    if (typeof segment === "string" && blockedPathKeys.has(segment))
+      return false;
+    const nextSegment = path[index2 + 1];
+    let next = current[segment];
+    if (!next || typeof next !== "object") {
+      next = typeof nextSegment === "number" ? [] : {};
+      current[segment] = next;
+    }
+    current = next;
+  }
+  const finalSegment = path[path.length - 1];
+  if (typeof finalSegment === "string" && blockedPathKeys.has(finalSegment))
+    return false;
+  current[finalSegment] = value;
+  return true;
+}
+function removeTrackerArrayItem(root, path, index2) {
+  const value = getTrackerValueAtPath(root, path);
+  if (!Array.isArray(value) || index2 < 0 || index2 >= value.length)
+    return false;
+  value.splice(index2, 1);
+  return true;
+}
+function appendTrackerArrayItem(root, path, value) {
+  const current = getTrackerValueAtPath(root, path);
+  if (!Array.isArray(current))
+    return setTrackerValueAtPath(root, path, [value]);
+  current.push(value);
+  return true;
+}
+function getTrackerValueAtPath(root, path) {
+  let current = root;
+  for (const segment of path) {
+    if (!current || typeof current !== "object")
+      return;
+    current = current[segment];
+  }
+  return current;
+}
+function cloneTrackerEditValue(value) {
+  return structuredClone(value);
+}
+function createTrackerEditDefaultValue(schema, depth = 0) {
+  if (Object.prototype.hasOwnProperty.call(schema, "default"))
+    return structuredClone(schema.default);
+  if (Object.prototype.hasOwnProperty.call(schema, "const"))
+    return structuredClone(schema.const);
+  if (Array.isArray(schema.enum) && schema.enum.length > 0)
+    return structuredClone(schema.enum[0]);
+  if (depth >= 12)
+    return null;
+  const type = schemaType(schema);
+  if (type === "object" || schema.properties) {
+    const properties = getRecord2(schema.properties);
+    const required = Array.isArray(schema.required) ? schema.required.filter((key) => typeof key === "string" && !blockedPathKeys.has(key)) : [];
+    return Object.fromEntries(required.map((key) => [
+      key,
+      createTrackerEditDefaultValue(getRecord2(properties[key]), depth + 1)
+    ]));
+  }
+  if (type === "array")
+    return [];
+  if (type === "boolean")
+    return false;
+  if (type === "number" || type === "integer") {
+    return typeof schema.minimum === "number" ? schema.minimum : 0;
+  }
+  return "";
+}
+
 // src/frontend.ts
 var state = {
   settings: defaultSettings,
@@ -3801,6 +4041,7 @@ var trackerRuntimeError = null;
 var isGenerationRequestPending = false;
 var generationRequestWatchdog = null;
 var editorRequestSeq = 0;
+var trackerEditRequestSeq = 0;
 var settingsSaveRequestSeq = 0;
 var automaticSaveRequestSeq = 0;
 var drawerSelectHandles = [];
@@ -3810,6 +4051,7 @@ var drawerView = "settings";
 var appliedTrackerPlacement = null;
 var hasReceivedInitialState = false;
 var regenerationModalHandle = null;
+var trackerEditSession = null;
 var presetEditorDrafts = new Map;
 var pendingTextEditors = new Map;
 var settingsDraft = new SettingsDraftTracker;
@@ -3818,6 +4060,7 @@ var GENERATION_REQUEST_TIMEOUT_MS = 1e4;
 var iconSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l-6 3V6l6-3 6 3 6-3v15l-6 3-6-3z"/><path d="M9 3v15"/><path d="M15 6v15"/></svg>`;
 function setup(ctx) {
   hasReceivedInitialState = false;
+  trackerEditSession = null;
   settingsDraft.reset();
   automaticSettingsDraft.reset();
   presetEditorDrafts.clear();
@@ -3863,6 +4106,7 @@ function setup(ctx) {
       const previousState = state;
       const incomingState = payload.state;
       hasReceivedInitialState = true;
+      reconcileTrackerEditSession(incomingState, payload);
       if (!settingsDraft.initialized)
         settingsDraft.initialize(presetSettingsFingerprint(incomingState.settings));
       if (typeof payload.automaticSettingsSaveRequestId === "string") {
@@ -3907,7 +4151,10 @@ function setup(ctx) {
       const saveFailed = typeof payload.requestId === "string" && settingsDraft.fail(payload.requestId);
       const automaticSaveFailed = typeof payload.requestId === "string" && automaticSettingsDraft.fail(payload.requestId);
       const pendingEditor = typeof payload.requestId === "string" ? takePendingTextEditor(payload.requestId) : null;
-      if (!saveFailed && !automaticSaveFailed && !pendingEditor)
+      const trackerEditFailed = typeof payload.requestId === "string" && trackerEditSession?.requestId === payload.requestId;
+      if (trackerEditFailed && trackerEditSession)
+        trackerEditSession.requestId = null;
+      if (!saveFailed && !automaticSaveFailed && !pendingEditor && !trackerEditFailed)
         clearGenerationRequestPending();
       syncSettingsDraftUi();
       renderChatToolbar();
@@ -3973,6 +4220,7 @@ function setup(ctx) {
     clearGenerationRequestPending();
     settingsRuntimeError = null;
     trackerRuntimeError = null;
+    trackerEditSession = null;
     settingsDraft.reset();
     presetEditorDrafts.clear();
     automaticSettingsDraft.reset();
@@ -3986,6 +4234,8 @@ function ensureDockPanel() {
   if (dockRootRef && dockPanelHandle)
     return;
   dockRootRef?.removeEventListener("click", handleClick);
+  dockRootRef?.removeEventListener("change", handleChange);
+  dockRootRef?.removeEventListener("input", handleInput);
   cleanupDockResizeHandles();
   dockPanelHandle?.destroy();
   let panel;
@@ -4010,11 +4260,15 @@ function ensureDockPanel() {
   dockRootRef = panel.root;
   dockRootRef.classList.add("scenemap-lv", "scenemap-dock-root");
   dockRootRef.addEventListener("click", handleClick);
+  dockRootRef.addEventListener("change", handleChange);
+  dockRootRef.addEventListener("input", handleInput);
   renderDockPanel();
   watchDockResizeHandle();
 }
 function destroyDockPanel() {
   dockRootRef?.removeEventListener("click", handleClick);
+  dockRootRef?.removeEventListener("change", handleChange);
+  dockRootRef?.removeEventListener("input", handleInput);
   dockResizeObserver?.disconnect();
   cleanupDockResizeHandles();
   dockPanelHandle?.destroy();
@@ -4205,7 +4459,8 @@ function renderChatToolbar() {
     return;
   }
   const isGenerating = Boolean(state.generationActive || isGenerationRequestPending);
-  const label = isGenerating ? "Cancel SceneMap generation" : state.latest ? "Regenerate SceneMap" : "Generate SceneMap";
+  const isEditing = Boolean(getCurrentTrackerEditSession());
+  const label = isEditing ? "Save or cancel the tracker edit first" : isGenerating ? "Cancel SceneMap generation" : state.latest ? "Regenerate SceneMap" : "Generate SceneMap";
   const isBehind = !state.latest || state.messagesBehind > 0;
   toolbarRootRef.innerHTML = `
     <button
@@ -4214,7 +4469,7 @@ function renderChatToolbar() {
       data-action="generate"
       title="${escapeAttr(label)}"
       aria-label="${escapeAttr(label)}"
-      ${state.activeMessageId ? "" : "disabled"}
+      ${state.activeMessageId && !isEditing ? "" : "disabled"}
     >
       ${isGenerating ? refreshSvg() : iconSvg}
     </button>
@@ -4285,27 +4540,49 @@ function drawerPageMarkup(content) {
 function trackerPanelMarkup() {
   const settings = mergeSettings(state.settings);
   const latest = state.latest;
-  const trackerValue = latest?.displayData ?? latest?.data;
-  const layout = latest && !latest.schemaMatchesCurrent ? createTrackerDataLayout(trackerValue) : getPresetLayout(settings, state.effectivePresetKey);
+  const schemaMatches = trackerMatchesEffectiveSchema(latest, settings);
+  const editSession = getCurrentTrackerEditSession();
+  const trackerValue = editSession?.draft ?? latest?.displayData ?? latest?.data;
+  const trackerSchema = editSession ? getEffectiveTrackerSchema(settings) : null;
+  const layout = latest && !schemaMatches ? createTrackerDataLayout(trackerValue) : getPresetLayout(settings, state.effectivePresetKey);
   return `
     <div class="scenemap-shell">
       <header class="scenemap-header">
-        <button class="scenemap-pill-action scenemap-tracker-action scenemap-primary" data-action="${latest && !state.generationActive && !isGenerationRequestPending ? "choose-regeneration" : "generate"}" ${state.activeMessageId ? "" : "disabled"}>
-          ${state.generationActive || isGenerationRequestPending ? "Cancel" : latest ? "Regenerate" : "Generate"}
-        </button>
-        <button class="scenemap-pill-action scenemap-tracker-action" data-action="edit" ${latest?.schemaMatchesCurrent ? "" : "disabled"}>Edit</button>
-        <button class="scenemap-pill-action scenemap-tracker-action scenemap-danger" data-action="delete" ${latest ? "" : "disabled"}>Delete</button>
+        ${editSession ? `
+          <button class="scenemap-pill-action scenemap-tracker-action scenemap-primary" data-action="save-tracker-edit" ${editSession.requestId ? "disabled" : ""}>${editSession.requestId ? "Saving..." : "Save"}</button>
+          <button class="scenemap-pill-action scenemap-tracker-action" data-action="cancel-tracker-edit" ${editSession.requestId ? "disabled" : ""}>Cancel</button>
+        ` : `
+          <button class="scenemap-pill-action scenemap-tracker-action scenemap-primary" data-action="${latest && !state.generationActive && !isGenerationRequestPending ? "choose-regeneration" : "generate"}" ${state.activeMessageId ? "" : "disabled"}>
+            ${state.generationActive || isGenerationRequestPending ? "Cancel" : latest ? "Regenerate" : "Generate"}
+          </button>
+          <button class="scenemap-pill-action scenemap-tracker-action" data-action="edit" ${schemaMatches && !state.generationActive && !isGenerationRequestPending ? "" : "disabled"}>Edit</button>
+          <button class="scenemap-pill-action scenemap-tracker-action scenemap-danger" data-action="delete" ${latest ? "" : "disabled"}>Delete</button>
+        `}
       </header>
 
       ${trackerRuntimeError ? `<div class="scenemap-runtime-error" role="alert" data-tracker-runtime-error>${escapeHtml(trackerRuntimeError)}</div>` : ""}
 
       <p class="scenemap-status is-${statusTone()}" role="status" aria-live="polite">${statusMarkup()}</p>
 
-      <section class="scenemap-card scenemap-board">
-        ${latest ? renderTracker(trackerValue, layout) : `<div class="scenemap-empty">Generate a SceneMap for this swipe</div>`}
+      <section class="scenemap-card scenemap-board ${editSession ? "is-editing" : ""}">
+        ${latest ? renderTracker(trackerValue, layout, trackerSchema) : `<div class="scenemap-empty">Generate a SceneMap for this swipe</div>`}
       </section>
     </div>
   `;
+}
+function getEffectiveTrackerSchema(settings = mergeSettings(state.settings)) {
+  return settings.schemaPresets[state.effectivePresetKey]?.value ?? settings.schemaPresets[settings.schemaPreset]?.value ?? settings.schemaPresets.default.value;
+}
+function trackerMatchesEffectiveSchema(latest = state.latest, settings = mergeSettings(state.settings)) {
+  return Boolean(latest?.schemaHash && latest.schemaHash === schemaFingerprint(getEffectiveTrackerSchema(settings)));
+}
+function getCurrentTrackerEditSession() {
+  const latest = state.latest;
+  if (!trackerEditSession || !latest || state.chatId !== trackerEditSession.chatId || latest.messageId !== trackerEditSession.messageId || latest.swipeId !== trackerEditSession.swipeId || !trackerMatchesEffectiveSchema(latest)) {
+    trackerEditSession = null;
+    return null;
+  }
+  return trackerEditSession;
 }
 function renderDrawerSettings() {
   if (!rootRef)
@@ -4547,6 +4824,8 @@ function statusText() {
     return "Open a chat to start tracking";
   if (isMappingScene())
     return "Mapping this scene";
+  if (getCurrentTrackerEditSession())
+    return "Editing tracker — save or cancel your changes";
   if (state.latest && !state.latest.schemaMatchesCurrent)
     return "Schema changed — regenerate to update";
   const autoText = autoGenerateStatusText();
@@ -4575,6 +4854,8 @@ function statusTone() {
     return "neutral";
   if (isMappingScene())
     return "generating";
+  if (getCurrentTrackerEditSession())
+    return "info";
   if (state.latest && !state.latest.schemaMatchesCurrent)
     return "warning";
   if (state.settings.autoGenerateAiTrackers && state.autoGenerateMessagesRemaining != null) {
@@ -4616,14 +4897,16 @@ function handleClick(event) {
   }
   if (action === "choose-regeneration")
     openRegenerationModal();
-  if (action === "edit" && state.latest?.schemaMatchesCurrent && state.chatId) {
-    clearTrackerRuntimeError();
-    const { messageId, swipeId, data: trackerData } = state.latest;
-    const chatId = state.chatId;
-    openJsonEditor("Edit Tracker JSON", trackerData, (data) => {
-      send({ type: "edit_tracker", chatId, messageId, swipeId, data });
-    });
-  }
+  if (action === "edit")
+    startTrackerEdit();
+  if (action === "save-tracker-edit")
+    saveTrackerEdit();
+  if (action === "cancel-tracker-edit")
+    cancelTrackerEdit();
+  if (action === "add-tracker-card")
+    addTrackerEditCard(button);
+  if (action === "remove-tracker-card")
+    removeTrackerEditCard(button);
   if (action === "delete" && state.latest)
     confirmDeleteTracker();
   if (action === "create-preset" && ensureActivePresetEditorValid() && ensureCurrentPresetLayoutValid())
@@ -4647,6 +4930,115 @@ function handleClick(event) {
       return;
     renderDrawerSettings();
     send({ type: "save_preset_settings", requestId, settings: state.settings });
+  }
+}
+function startTrackerEdit() {
+  const latest = state.latest;
+  const chatId = state.chatId;
+  if (!latest || !trackerMatchesEffectiveSchema(latest) || !chatId || state.generationActive || isGenerationRequestPending)
+    return;
+  clearTrackerRuntimeError();
+  trackerEditSession = {
+    chatId,
+    messageId: latest.messageId,
+    swipeId: latest.swipeId,
+    baseline: cloneTrackerEditValue(latest.data),
+    draft: cloneTrackerEditValue(latest.data),
+    requestId: null
+  };
+  renderTrackerEditSurface({ focusFirstControl: true });
+  renderChatToolbar();
+  renderTopToolbarButton();
+}
+function saveTrackerEdit() {
+  const session = getCurrentTrackerEditSession();
+  if (!session || session.requestId)
+    return;
+  clearTrackerRuntimeError();
+  try {
+    const validated = validateTrackerData(session.draft, getEffectiveTrackerSchema(), "Edited tracker");
+    session.draft = cloneTrackerEditValue(validated);
+  } catch (error) {
+    showTrackerError(error.message);
+    return;
+  }
+  const requestId = `tracker-edit-${Date.now()}-${++trackerEditRequestSeq}`;
+  session.requestId = requestId;
+  renderTrackerEditSurface();
+  send({
+    type: "edit_tracker",
+    requestId,
+    chatId: session.chatId,
+    messageId: session.messageId,
+    swipeId: session.swipeId,
+    expectedData: session.baseline,
+    data: session.draft
+  });
+}
+function cancelTrackerEdit() {
+  const session = getCurrentTrackerEditSession();
+  if (!session || session.requestId)
+    return;
+  trackerEditSession = null;
+  clearTrackerRuntimeError();
+  renderTrackerEditSurface();
+  renderChatToolbar();
+  renderTopToolbarButton();
+}
+function addTrackerEditCard(button) {
+  const session = getCurrentTrackerEditSession();
+  if (!session || session.requestId)
+    return;
+  const path = readTrackerEditPath(button.dataset.editPath);
+  const itemSchema = path ? getTrackerSchemaAtPath(getEffectiveTrackerSchema(), [...path, 0]) : null;
+  if (!path || !itemSchema || !appendTrackerArrayItem(session.draft, path, createTrackerEditDefaultValue(itemSchema)))
+    return;
+  renderTrackerEditSurface();
+}
+function removeTrackerEditCard(button) {
+  const session = getCurrentTrackerEditSession();
+  if (!session || session.requestId)
+    return;
+  const path = readTrackerEditPath(button.dataset.editPath);
+  const index2 = Number(button.dataset.editIndex);
+  if (!path || !Number.isSafeInteger(index2) || !removeTrackerArrayItem(session.draft, path, index2))
+    return;
+  renderTrackerEditSurface();
+}
+function renderTrackerEditSurface(options = {}) {
+  const root = mergeSettings(state.settings).trackerPlacement === "drawer" ? rootRef : dockRootRef;
+  const scrollSnapshot = root ? captureScrollPositions(root) : [];
+  if (drawerScrollRestoreFrame !== null)
+    cancelAnimationFrame(drawerScrollRestoreFrame);
+  drawerScrollRestoreFrame = null;
+  renderTrackerSurfaces();
+  restoreScrollPositions(scrollSnapshot);
+  drawerScrollRestoreFrame = requestAnimationFrame(() => {
+    drawerScrollRestoreFrame = null;
+    restoreScrollPositions(scrollSnapshot);
+    if (options.focusFirstControl) {
+      const currentRoot = mergeSettings(state.settings).trackerPlacement === "drawer" ? rootRef : dockRootRef;
+      currentRoot?.querySelector("[data-tracker-edit-control]")?.focus();
+    }
+  });
+}
+function reconcileTrackerEditSession(incomingState, payload) {
+  const session = trackerEditSession;
+  if (!session)
+    return;
+  if (typeof payload?.trackerEditRequestId === "string" && payload.trackerEditRequestId === session.requestId) {
+    trackerEditSession = null;
+    trackerRuntimeError = null;
+    return;
+  }
+  const latest = incomingState.latest;
+  if (incomingState.chatId !== session.chatId || !latest || latest.messageId !== session.messageId || latest.swipeId !== session.swipeId || !latest.schemaMatchesCurrent) {
+    trackerEditSession = null;
+    return;
+  }
+  if (!jsonValuesEqual(latest.data, session.baseline)) {
+    trackerEditSession = null;
+    trackerRuntimeError = "This tracker changed while it was being edited. Open Edit again to use the newest values.";
   }
 }
 function dispatchGeneration(payload) {
@@ -5054,6 +5446,10 @@ function ensureCurrentPresetLayoutValid() {
 }
 function handleChange(event) {
   const target = event.target;
+  if (target.dataset.trackerEditControl) {
+    updateTrackerEditControl(target);
+    return;
+  }
   const key = target.dataset.setting;
   if (!isAutomaticallySavedSetting(key))
     return;
@@ -5061,6 +5457,10 @@ function handleChange(event) {
 }
 function handleInput(event) {
   const target = event.target;
+  if (target.dataset.trackerEditControl) {
+    updateTrackerEditControl(target);
+    return;
+  }
   if (target.dataset.presetEditor) {
     updatePresetEditorControl(target);
     return;
@@ -5069,6 +5469,35 @@ function handleInput(event) {
   if (!isAutomaticallySavedSetting(key) || target.type === "checkbox")
     return;
   updateSettingFromControl(target, key, false);
+}
+function updateTrackerEditControl(target) {
+  const session = getCurrentTrackerEditSession();
+  if (!session || session.requestId)
+    return;
+  const path = readTrackerEditPath(target.dataset.editPath);
+  const kind = target.dataset.editKind;
+  if (!path || !kind)
+    return;
+  const schema = getTrackerSchemaAtPath(getEffectiveTrackerSchema(), path);
+  const value = parseTrackerEditValue(kind, target.value, schema);
+  if (!setTrackerValueAtPath(session.draft, path, value)) {
+    showTrackerError("This field cannot be edited safely.");
+  }
+}
+function readTrackerEditPath(value) {
+  if (!value)
+    return null;
+  try {
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed))
+      return null;
+    return parsed.every((part) => typeof part === "string" || Number.isSafeInteger(part) && part >= 0) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+function trackerEditPathAttr(path) {
+  return escapeAttr(JSON.stringify(path));
 }
 function isAutomaticallySavedSetting(key) {
   return key === "connectionId" || key === "autoGenerateAiTrackers" || key === "autoGenerateInterval" || key === "maxResponseTokens" || key === "temperature" || key === "topP" || key === "includeLastXMessages" || key === "showInputBarButton" || key === "showTopToolbarButton" || key === "trackerPlacement";
@@ -5229,10 +5658,10 @@ async function importPreset() {
   }
 }
 function parsePresetImport(value, filename) {
-  const record = getRecord2(value);
+  const record = getRecord3(value);
   if (record.type !== "scenemap-preset")
     throw new Error("This is not a SceneMap preset file.");
-  const schema = getRecord2(record.schema);
+  const schema = getRecord3(record.schema);
   if (Object.keys(schema).length === 0)
     throw new Error("Preset file is missing a schema object.");
   validateSchemaDefinition(schema);
@@ -5248,12 +5677,12 @@ function parsePresetImport(value, filename) {
   };
 }
 function normalizeImportedLayout(value) {
-  const record = getRecord2(value);
+  const record = getRecord3(value);
   if (!Array.isArray(record.sections))
     throw new Error("Preset file is missing a layout sections array.");
   return {
     sections: record.sections.map((section) => {
-      const sectionRecord = getRecord2(section);
+      const sectionRecord = getRecord3(section);
       if (!Array.isArray(sectionRecord.fields))
         throw new Error("Every layout section must include a fields array.");
       return {
@@ -5264,7 +5693,7 @@ function normalizeImportedLayout(value) {
   };
 }
 function normalizeImportedField(value) {
-  const record = getRecord2(value);
+  const record = getRecord3(value);
   const display = typeof record.display === "string" && isTrackerFieldDisplay(record.display) ? record.display : "text";
   return {
     path: typeof record.path === "string" ? record.path : "",
@@ -5642,13 +6071,14 @@ function renderTopToolbarButton() {
   if (!button)
     return;
   const isGenerating = Boolean(state.generationActive || isGenerationRequestPending);
+  const isEditing = Boolean(getCurrentTrackerEditSession());
   const status = getTopToolbarStatus(state, isGenerationRequestPending);
-  const actionLabel = isGenerating ? "Cancel SceneMap generation" : state.latest ? "Regenerate SceneMap" : "Generate SceneMap";
+  const actionLabel = isEditing ? "Save or cancel the tracker edit first" : isGenerating ? "Cancel SceneMap generation" : state.latest ? "Regenerate SceneMap" : "Generate SceneMap";
   const accessibleLabel = `${actionLabel} — ${status.text}`;
   button.className = `scenemap-top-toolbar-btn is-${status.tone} ${isGenerating ? "is-generating" : ""}`;
   button.title = accessibleLabel;
   button.setAttribute("aria-label", accessibleLabel);
-  button.disabled = !state.activeMessageId && !isGenerating;
+  button.disabled = isEditing || !state.activeMessageId && !isGenerating;
   button.innerHTML = `
     <span class="scenemap-top-toolbar-dot" aria-hidden="true"></span>
     <span class="scenemap-top-toolbar-icon" aria-hidden="true">${isGenerating ? refreshSvg() : iconSvg}</span>
@@ -5973,7 +6403,7 @@ function extractSchemaFieldOptions(schema) {
 }
 var MAX_LAYOUT_SCHEMA_DEPTH = 20;
 function schemaToOptions(schema, path, labelSeed, rootSchema, seenRefs = new Set, depth = 0) {
-  const source = getRecord2(schema);
+  const source = getRecord3(schema);
   const ref = typeof source.$ref === "string" && source.$ref.startsWith("#/") ? source.$ref : null;
   if (depth >= MAX_LAYOUT_SCHEMA_DEPTH || ref && seenRefs.has(ref)) {
     return [{ path, label: schemaLabel(source, labelSeed), display: defaultDisplayForSchema(source, path) }];
@@ -5982,7 +6412,7 @@ function schemaToOptions(schema, path, labelSeed, rootSchema, seenRefs = new Set
   const record = normalizeSchemaForLayout(schema, rootSchema, seenRefs);
   const type = record.type;
   if (type === "array") {
-    const itemSource = getRecord2(record.items);
+    const itemSource = getRecord3(record.items);
     const itemRef = typeof itemSource.$ref === "string" && itemSource.$ref.startsWith("#/") ? itemSource.$ref : null;
     if (itemRef && nextSeenRefs.has(itemRef)) {
       return [{ path, label: schemaLabel(record, labelSeed), display: "chips" }];
@@ -6007,7 +6437,7 @@ function schemaToOptions(schema, path, labelSeed, rootSchema, seenRefs = new Set
   return [{ path, label: schemaLabel(record, labelSeed), display: defaultDisplayForSchema(record, path) }];
 }
 function normalizeSchemaForLayout(schema, rootSchema, seenRefs = new Set) {
-  const source = getRecord2(schema);
+  const source = getRecord3(schema);
   let normalized = { ...source };
   const ref = typeof source.$ref === "string" ? source.$ref : null;
   if (ref?.startsWith("#/") && !seenRefs.has(ref)) {
@@ -6047,7 +6477,7 @@ function resolveLocalLayoutRef(rootSchema, ref) {
   return current;
 }
 function getSchemaProperties(schema) {
-  const record = getRecord2(schema);
+  const record = getRecord3(schema);
   return record.properties && typeof record.properties === "object" && !Array.isArray(record.properties) ? record.properties : null;
 }
 function schemaLabel(schema, fallback) {
@@ -6180,14 +6610,6 @@ function layoutIcon(name) {
   };
   return `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name]}</svg>`;
 }
-function openJsonEditor(title, value, onSave) {
-  openTextEditor(title, JSON.stringify(value, null, 2), (text) => {
-    const data = JSON.parse(text);
-    if (!data || typeof data !== "object" || Array.isArray(data))
-      throw new Error("JSON must be an object.");
-    onSave(data);
-  });
-}
 function openTextEditor(title, value, onSave, surface = "tracker") {
   if (Array.from(pendingTextEditors.values()).some((pending) => pending.title === title)) {
     const message = `${title} is already open.`;
@@ -6275,13 +6697,13 @@ function showSettingsError(message) {
   if (!preserveActiveSettings || !mountSettingsRuntimeError(message))
     renderDrawerSettings();
 }
-function renderTracker(value, layout) {
-  const record = getRecord2(value);
+function renderTracker(value, layout, editSchema = null) {
+  const record = getRecord3(value);
   if (Object.keys(record).length === 0)
     return `<div class="scenemap-empty">Tracker data is empty.</div>`;
   const sections = layout?.sections?.length ? layout.sections : DEFAULT_DISPLAY_LAYOUT.sections;
   const html = sections.map((section) => {
-    const fields = section.fields.map((field) => renderField(field, record)).filter(Boolean).join("");
+    const fields = section.fields.map((field) => editSchema ? renderEditableField(field, record, editSchema, []) : renderField(field, record)).filter(Boolean).join("");
     if (!fields)
       return "";
     const title = section.title?.trim();
@@ -6289,8 +6711,81 @@ function renderTracker(value, layout) {
   }).filter(Boolean).join("");
   return html || `<div class="scenemap-empty">Tracker data is empty.</div>`;
 }
+function renderEditableField(field, draft, rootSchema, basePath) {
+  const path = [...basePath, ...field.path.split(".").filter(Boolean)];
+  const value = getTrackerValueAtPath(draft, path);
+  const label = getFieldLabel(field);
+  const display = field.display || "text";
+  if (display === "character_cards") {
+    const cards = Array.isArray(value) ? value : [];
+    return `
+      <div class="scenemap-edit-card-list">
+        <div class="scenemap-character-grid">
+          ${cards.map((_, index2) => renderEditableCharacterCard(draft, index2, field, path, rootSchema)).join("")}
+        </div>
+        <button type="button" class="scenemap-edit-add-card" data-action="add-tracker-card" data-edit-path="${trackerEditPathAttr(path)}">+ Add item</button>
+      </div>
+    `;
+  }
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return `<div class="scenemap-field">${label ? `<span>${escapeHtml(label)}</span>` : ""}<p>${escapeHtml(formatDisplayValue(value))}</p></div>`;
+  }
+  return renderTrackerEditControl(path, label, display, value, rootSchema);
+}
+function renderEditableCharacterCard(draft, index2, parentField, parentPath, rootSchema) {
+  const itemPath = [...parentPath, index2];
+  const record = getRecord3(getTrackerValueAtPath(draft, itemPath));
+  const namePath = [...itemPath, "name"];
+  const nameSchema = getTrackerSchemaAtPath(rootSchema, namePath);
+  const hasEditableName = Object.keys(nameSchema).length > 0 || Object.prototype.hasOwnProperty.call(record, "name");
+  const fallbackFields = Object.keys(record).filter((key) => key !== "name").map((key) => ({
+    path: key,
+    label: humanizeTrackerKey(key),
+    display: key === "postureAndInteraction" ? "mono" : "text"
+  }));
+  const fields = ((parentField.fields?.length) ? parentField.fields : fallbackFields).filter((field) => !(hasEditableName && field.path === "name"));
+  return `
+    <article class="scenemap-character scenemap-character-edit">
+      <div class="scenemap-character-edit-header">
+        ${hasEditableName ? renderTrackerEditControl(namePath, "Character name", "text", record.name, rootSchema, true) : `<h4>${escapeHtml(`Item ${index2 + 1}`)}</h4>`}
+        <button type="button" class="scenemap-icon-btn scenemap-edit-remove-card" data-action="remove-tracker-card" data-edit-path="${trackerEditPathAttr(parentPath)}" data-edit-index="${index2}" title="Remove item" aria-label="Remove item">${layoutIcon("trash")}</button>
+      </div>
+      ${fields.map((field) => renderEditableField(field, draft, rootSchema, itemPath)).join("")}
+    </article>
+  `;
+}
+function renderTrackerEditControl(path, label, display, value, rootSchema, characterName = false) {
+  const schema = getTrackerSchemaAtPath(rootSchema, path);
+  const kind = getTrackerEditControlKind(schema, value);
+  const labelMarkup = label ? `<span>${escapeHtml(label)}</span>` : "";
+  const common = `data-tracker-edit-control="true" data-edit-path="${trackerEditPathAttr(path)}" data-edit-kind="${kind}" aria-label="${escapeAttr(label || humanizeTrackerKey(String(path.at(-1) ?? "Value")))}"`;
+  let control;
+  if (kind === "enum") {
+    const options = Array.isArray(schema.enum) ? schema.enum : [];
+    control = `<select ${common}>${options.map((option2, index2) => `<option value="${index2}" ${jsonValuesEqual(option2, value) ? "selected" : ""}>${escapeHtml(formatDisplayValue(option2))}</option>`).join("")}</select>`;
+  } else if (kind === "boolean") {
+    control = `<select ${common}><option value="true" ${value === true ? "selected" : ""}>Yes</option><option value="false" ${value !== true ? "selected" : ""}>No</option></select>`;
+  } else if (kind === "number" || kind === "integer") {
+    const minimum = typeof schema.minimum === "number" ? ` min="${schema.minimum}"` : "";
+    const maximum = typeof schema.maximum === "number" ? ` max="${schema.maximum}"` : "";
+    control = `<input type="number" ${common}${minimum}${maximum} step="${kind === "integer" ? "1" : "any"}" value="${escapeAttr(value ?? "")}">`;
+  } else if (kind.endsWith("_array")) {
+    const lines = Array.isArray(value) ? value.map(formatDisplayValue).join(`
+`) : "";
+    control = `<textarea ${common} rows="${Math.max(2, Math.min(5, Array.isArray(value) ? value.length : 2))}" placeholder="One item per line">${escapeHtml(lines)}</textarea>`;
+  } else if (display === "mono" || typeof value === "string" && (value.length > 64 || value.includes(`
+`))) {
+    control = `<textarea ${common} rows="${typeof value === "string" && value.length > 180 ? 4 : 3}">${escapeHtml(value ?? "")}</textarea>`;
+  } else {
+    control = `<input type="text" ${common} value="${escapeAttr(value ?? "")}">`;
+  }
+  if (characterName) {
+    return `<label class="scenemap-character-name-edit">${labelMarkup}${control}</label>`;
+  }
+  return `<label class="scenemap-field scenemap-edit-field">${labelMarkup}${control}</label>`;
+}
 function createTrackerDataLayout(value) {
-  const record = getRecord2(value);
+  const record = getRecord3(value);
   return {
     sections: [{
       title: "Tracker",
@@ -6298,7 +6793,7 @@ function createTrackerDataLayout(value) {
         if (Array.isArray(child) && child.some((item) => item && typeof item === "object" && !Array.isArray(item))) {
           const childKeys = new Set;
           for (const item of child) {
-            for (const childKey of Object.keys(getRecord2(item))) {
+            for (const childKey of Object.keys(getRecord3(item))) {
               if (childKey !== "name")
                 childKeys.add(childKey);
             }
@@ -6367,12 +6862,12 @@ function renderProgressField(label, path, value) {
   `;
 }
 function renderCharacterCard(value, index2, fields) {
-  const record = getRecord2(value);
+  const record = getRecord3(value);
   const name = formatDisplayValue(record.name) || `Character ${index2 + 1}`;
   const innerFields = fields.length > 0 ? fields.map((field) => renderField(field, record)).join("") : Object.entries(record).filter(([key]) => key !== "name").map(([key, child]) => renderField({ path: key, label: humanizeTrackerKey(key), display: key === "postureAndInteraction" ? "mono" : "text" }, { [key]: child })).join("");
   return `<article class="scenemap-character"><h4>${escapeHtml(name)}</h4>${innerFields}</article>`;
 }
-function getRecord2(value) {
+function getRecord3(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
 function getValueByPath(value, path) {
@@ -6515,6 +7010,20 @@ var styles = `
 .scenemap-character-grid { display: flex; flex-direction: column; gap: 14px; }
 .scenemap-character { border: 1px solid var(--lumiverse-primary-020, var(--lumiverse-border)); background: color-mix(in srgb, var(--lumiverse-fill) 82%, var(--lumiverse-primary, var(--lumiverse-accent)) 6%); border-radius: var(--lumiverse-radius, 8px); padding: 10px; }
 .scenemap-character h4 { margin: 0 0 10px; color: color-mix(in srgb, var(--lumiverse-text) 72%, var(--lumiverse-primary, var(--lumiverse-accent)) 28%); font-size: 14px; font-weight: 760; }
+.scenemap-board.is-editing { border-color: color-mix(in srgb, var(--lumiverse-primary, var(--lumiverse-accent)) 24%, transparent); }
+.scenemap-edit-field > input, .scenemap-edit-field > textarea, .scenemap-edit-field > select, .scenemap-character-name-edit > input, .scenemap-character-name-edit > textarea, .scenemap-character-name-edit > select { width: 100%; box-sizing: border-box; border: 1px solid var(--lumiverse-border); border-radius: var(--lumiverse-radius-sm, 5px); background: var(--lumiverse-secondary, rgba(128, 128, 128, .15)); color: var(--lumiverse-text); padding: 8px 9px; font: inherit; font-size: 13px; line-height: 1.4; }
+.scenemap-edit-field > textarea { min-height: 62px; resize: vertical; }
+.scenemap-edit-field > select, .scenemap-character-name-edit > select { appearance: auto; }
+.scenemap-edit-field > input:focus, .scenemap-edit-field > textarea:focus, .scenemap-edit-field > select:focus, .scenemap-character-name-edit > input:focus, .scenemap-character-name-edit > textarea:focus, .scenemap-character-name-edit > select:focus { outline: none; border-color: var(--lumiverse-primary, var(--lumiverse-accent)); box-shadow: 0 0 0 1px var(--lumiverse-primary-020, transparent); }
+.scenemap-character-edit { display: flex; flex-direction: column; }
+.scenemap-character-edit-header { display: flex; align-items: flex-end; gap: 8px; margin-bottom: 10px; }
+.scenemap-character-name-edit { display: flex; flex: 1 1 auto; min-width: 0; flex-direction: column; gap: 4px; }
+.scenemap-character-name-edit > span { color: var(--lumiverse-text-muted); font-size: 10px; font-weight: 700; text-transform: uppercase; }
+.scenemap-character-name-edit > input { color: color-mix(in srgb, var(--lumiverse-text) 72%, var(--lumiverse-primary, var(--lumiverse-accent)) 28%); font-size: 14px; font-weight: 760; }
+.scenemap-lv .scenemap-edit-remove-card { flex: 0 0 auto; width: 34px; height: 34px; color: var(--lumiverse-danger, #ef4444); }
+.scenemap-edit-card-list { display: flex; flex-direction: column; gap: 10px; }
+.scenemap-lv .scenemap-edit-add-card { width: 100%; padding: 8px 10px; border-style: dashed; color: var(--lumiverse-text-muted); background: transparent; }
+.scenemap-lv .scenemap-edit-add-card:hover:not(:disabled) { color: var(--lumiverse-primary, var(--lumiverse-accent)); border-color: var(--lumiverse-primary, var(--lumiverse-accent)); }
 .scenemap-drawer-scroll { flex: 0 0 auto; min-height: 0; overflow: visible; box-sizing: border-box; padding: 14px; }
 .scenemap-drawer-view { min-height: 0; }
 .scenemap-drawer-view > .scenemap-shell { flex: none; min-height: 0; overflow: visible; padding: 14px 0 0; }
