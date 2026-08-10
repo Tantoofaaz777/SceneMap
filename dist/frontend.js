@@ -5650,8 +5650,8 @@ function renderTopToolbarButton() {
   button.setAttribute("aria-label", accessibleLabel);
   button.disabled = !state.activeMessageId && !isGenerating;
   button.innerHTML = `
-    <span class="scenemap-top-toolbar-icon" aria-hidden="true">${isGenerating ? refreshSvg() : iconSvg}</span>
     <span class="scenemap-top-toolbar-dot" aria-hidden="true"></span>
+    <span class="scenemap-top-toolbar-icon" aria-hidden="true">${isGenerating ? refreshSvg() : iconSvg}</span>
   `;
 }
 function handleTopToolbarClick(event) {
