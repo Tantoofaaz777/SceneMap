@@ -63,6 +63,8 @@ let topToolbarInjection: Element | null = null;
 let topToolbarObserver: MutationObserver | null = null;
 let topToolbarObservationRoot: Element | null = null;
 let topToolbarEnsureQueued = false;
+let topToolbarTapTimer: ReturnType<typeof setTimeout> | null = null;
+let topToolbarLastPointerActivation = Number.NEGATIVE_INFINITY;
 let tabHandle: ReturnType<SpindleFrontendContext["ui"]["registerDrawerTab"]> | null = null;
 let dockPanelHandle: ReturnType<SpindleFrontendContext["ui"]["requestDockPanel"]> | null = null;
 let dockResizeObserver: MutationObserver | null = null;
@@ -127,6 +129,7 @@ const pendingTextEditors = new Map<string, PendingTextEditor>();
 const settingsDraft = new SettingsDraftTracker();
 const automaticSettingsDraft = new AutomaticSettingsDraftTracker<SceneMapSettings>();
 const GENERATION_REQUEST_TIMEOUT_MS = 10_000;
+const TOP_TOOLBAR_DOUBLE_TAP_MS = 280;
 
 const iconSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l-6 3V6l6-3 6 3 6-3v15l-6 3-6-3z"/><path d="M9 3v15"/><path d="M15 6v15"/></svg>`;
 
@@ -2283,6 +2286,7 @@ function ensureTopToolbarInjection() {
     "beforeend",
   );
   topToolbarInjection.addEventListener("click", handleTopToolbarClick);
+  topToolbarInjection.addEventListener("pointerup", handleTopToolbarPointerUp);
   renderTopToolbarButton();
 }
 
@@ -2304,7 +2308,7 @@ function renderTopToolbarButton() {
     : state.latest ? "Regenerate SceneMap" : "Generate SceneMap";
   const accessibleLabel = `${actionLabel} — ${status.text}`;
   button.className = `scenemap-top-toolbar-btn is-${status.tone} ${isGenerating ? "is-generating" : ""}`;
-  button.title = accessibleLabel;
+  button.title = `${accessibleLabel} — Double-click to open tracker`;
   button.setAttribute("aria-label", accessibleLabel);
   button.disabled = isEditing || (!state.activeMessageId && !isGenerating);
   button.innerHTML = `
@@ -2313,11 +2317,63 @@ function renderTopToolbarButton() {
   `;
 }
 
+function handleTopToolbarPointerUp(event: Event) {
+  const pointerEvent = event as PointerEvent;
+  const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-scenemap-top-toolbar-button]");
+  if (!button || button.disabled || !pointerEvent.isPrimary || pointerEvent.button !== 0) return;
+  topToolbarLastPointerActivation = performance.now();
+  scheduleTopToolbarTap();
+}
+
 function handleTopToolbarClick(event: Event) {
   const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-scenemap-top-toolbar-button]");
   if (!button || button.disabled) return;
+  const clickEvent = event as MouseEvent;
+  // Pointer activations are handled on pointerup so touch and mouse share the
+  // same double-tap window. Keep click for keyboard and assistive activation.
+  if (clickEvent.detail !== 0 && performance.now() - topToolbarLastPointerActivation < 700) {
+    event.preventDefault();
+    return;
+  }
+  if (clickEvent.detail === 0) {
+    if (topToolbarTapTimer) clearTimeout(topToolbarTapTimer);
+    topToolbarTapTimer = null;
+    runTopToolbarPrimaryAction();
+    return;
+  }
+  scheduleTopToolbarTap();
+}
+
+function scheduleTopToolbarTap() {
+  if (topToolbarTapTimer) {
+    clearTimeout(topToolbarTapTimer);
+    topToolbarTapTimer = null;
+    openTrackerSurface();
+    return;
+  }
+  topToolbarTapTimer = setTimeout(() => {
+    topToolbarTapTimer = null;
+    runTopToolbarPrimaryAction();
+  }, TOP_TOOLBAR_DOUBLE_TAP_MS);
+}
+
+function runTopToolbarPrimaryAction() {
+  const button = topToolbarInjection?.querySelector<HTMLButtonElement>("[data-scenemap-top-toolbar-button]");
+  if (!button || button.disabled) return;
   const command = getGenerationButtonCommand(state.generationActive, isGenerationRequestPending);
   dispatchGeneration({ type: command });
+}
+
+function openTrackerSurface() {
+  if (mergeSettings(state.settings).trackerPlacement === "drawer") {
+    drawerView = "tracker";
+    tabHandle?.activate();
+    renderDrawerContent();
+    return;
+  }
+  ensureDockPanel();
+  dockPanelHandle?.expand();
+  renderDockPanel();
 }
 
 function observeTopToolbar() {
@@ -2349,8 +2405,12 @@ function scheduleTopToolbarEnsure() {
 function clearTopToolbarInjection() {
   const injection = topToolbarInjection;
   topToolbarInjection = null;
+  if (topToolbarTapTimer) clearTimeout(topToolbarTapTimer);
+  topToolbarTapTimer = null;
+  topToolbarLastPointerActivation = Number.NEGATIVE_INFINITY;
   if (!injection) return;
   injection.removeEventListener("click", handleTopToolbarClick);
+  injection.removeEventListener("pointerup", handleTopToolbarPointerUp);
   ctxRef?.dom.uninject(injection);
 }
 
@@ -3395,7 +3455,7 @@ const styles = `
 .scenemap-chat-toolbar-btn:disabled { opacity: .45; cursor: default; }
 .scenemap-chat-toolbar-btn svg { width: 14px; height: 14px; }
 .scenemap-top-toolbar-host { display: inline-flex; align-items: center; }
-.scenemap-top-toolbar-btn { display: inline-flex; align-items: center; justify-content: center; gap: 5px; width: 34px; height: 28px; padding: 0 5px; border: 1px solid transparent; border-radius: var(--lumiverse-radius-sm, 6px); background: transparent; color: var(--lumiverse-text-dim); opacity: .68; cursor: pointer; transition: color var(--lumiverse-transition-fast, .12s ease), background var(--lumiverse-transition-fast, .12s ease), border-color var(--lumiverse-transition-fast, .12s ease), opacity var(--lumiverse-transition-fast, .12s ease); }
+.scenemap-top-toolbar-btn { display: inline-flex; align-items: center; justify-content: center; gap: 5px; width: 34px; height: 28px; padding: 0 5px; border: 1px solid transparent; border-radius: var(--lumiverse-radius-sm, 6px); background: transparent; color: var(--lumiverse-text-dim); opacity: .68; cursor: pointer; touch-action: manipulation; transition: color var(--lumiverse-transition-fast, .12s ease), background var(--lumiverse-transition-fast, .12s ease), border-color var(--lumiverse-transition-fast, .12s ease), opacity var(--lumiverse-transition-fast, .12s ease); }
 .scenemap-top-toolbar-btn:hover:not(:disabled), .scenemap-top-toolbar-btn:focus-visible { opacity: 1; color: var(--lumiverse-text); background: var(--lumiverse-fill-subtle); border-color: var(--lumiverse-border); outline: none; }
 .scenemap-top-toolbar-btn:focus-visible { box-shadow: 0 0 0 2px var(--lumiverse-primary-020, color-mix(in srgb, var(--lumiverse-primary) 20%, transparent)); }
 .scenemap-top-toolbar-btn:disabled { opacity: .38; cursor: default; }
