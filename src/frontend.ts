@@ -1046,6 +1046,8 @@ function handleClick(event: Event) {
   if (action === "cancel-tracker-edit") cancelTrackerEdit();
   if (action === "add-tracker-card") addTrackerEditCard(button);
   if (action === "remove-tracker-card") removeTrackerEditCard(button);
+  if (action === "add-tracker-chip") addTrackerEditChip(button);
+  if (action === "remove-tracker-chip") removeTrackerEditChip(button);
   if (action === "delete" && state.latest) void confirmDeleteTracker();
   if (action === "create-preset" && ensureActivePresetEditorValid() && ensureCurrentPresetLayoutValid()) createPreset();
   if (action === "rename-preset") renamePreset();
@@ -1122,7 +1124,7 @@ function addTrackerEditCard(button: HTMLElement) {
   const path = readTrackerEditPath(button.dataset.editPath);
   const itemSchema = path ? getTrackerSchemaAtPath(getEffectiveTrackerSchema(), [...path, 0]) : null;
   if (!path || !itemSchema || !appendTrackerArrayItem(session.draft, path, createTrackerEditDefaultValue(itemSchema))) return;
-  renderTrackerEditSurface();
+  renderTrackerEditSurface({ focusLastCardName: true });
 }
 
 function removeTrackerEditCard(button: HTMLElement) {
@@ -1134,7 +1136,29 @@ function removeTrackerEditCard(button: HTMLElement) {
   renderTrackerEditSurface();
 }
 
-function renderTrackerEditSurface(options: { focusFirstControl?: boolean } = {}) {
+function addTrackerEditChip(button: HTMLElement) {
+  const session = getCurrentTrackerEditSession();
+  if (!session || session.requestId) return;
+  const path = readTrackerEditPath(button.dataset.editPath);
+  const itemSchema = path ? getTrackerSchemaAtPath(getEffectiveTrackerSchema(), [...path, 0]) : null;
+  if (!path || !itemSchema || !appendTrackerArrayItem(session.draft, path, createTrackerEditDefaultValue(itemSchema))) return;
+  renderTrackerEditSurface({ focusLastChip: true });
+}
+
+function removeTrackerEditChip(button: HTMLElement) {
+  const session = getCurrentTrackerEditSession();
+  if (!session || session.requestId) return;
+  const path = readTrackerEditPath(button.dataset.editPath);
+  const index = Number(button.dataset.editIndex);
+  if (!path || !Number.isSafeInteger(index) || !removeTrackerArrayItem(session.draft, path, index)) return;
+  renderTrackerEditSurface();
+}
+
+function renderTrackerEditSurface(options: {
+  focusFirstControl?: boolean;
+  focusLastCardName?: boolean;
+  focusLastChip?: boolean;
+} = {}) {
   const root = mergeSettings(state.settings).trackerPlacement === "drawer" ? rootRef : dockRootRef;
   const scrollSnapshot = root ? captureScrollPositions(root) : [];
   if (drawerScrollRestoreFrame !== null) cancelAnimationFrame(drawerScrollRestoreFrame);
@@ -1144,9 +1168,15 @@ function renderTrackerEditSurface(options: { focusFirstControl?: boolean } = {})
   drawerScrollRestoreFrame = requestAnimationFrame(() => {
     drawerScrollRestoreFrame = null;
     restoreScrollPositions(scrollSnapshot);
+    const currentRoot = mergeSettings(state.settings).trackerPlacement === "drawer" ? rootRef : dockRootRef;
     if (options.focusFirstControl) {
-      const currentRoot = mergeSettings(state.settings).trackerPlacement === "drawer" ? rootRef : dockRootRef;
       currentRoot?.querySelector<HTMLElement>("[data-tracker-edit-control]")?.focus();
+    } else if (options.focusLastCardName) {
+      const names = currentRoot?.querySelectorAll<HTMLElement>(".scenemap-character-name-edit [data-tracker-edit-control]");
+      names?.item(names.length - 1)?.focus();
+    } else if (options.focusLastChip) {
+      const chips = currentRoot?.querySelectorAll<HTMLElement>("[data-tracker-edit-chip]");
+      chips?.item(chips.length - 1)?.focus();
     }
   });
 }
@@ -3038,6 +3068,9 @@ function renderEditableField(
   const value = getTrackerValueAtPath(draft, path);
   const label = getFieldLabel(field);
   const display = field.display || "text";
+  if (display === "chips" && Array.isArray(value)) {
+    return renderEditableChips(path, label, value, rootSchema, field.center === true);
+  }
   if (display === "character_cards") {
     const cards = Array.isArray(value) ? value : [];
     return `
@@ -3053,6 +3086,43 @@ function renderEditableField(
     return `<div class="scenemap-field">${label ? `<span>${escapeHtml(label)}</span>` : ""}<p>${escapeHtml(formatDisplayValue(value))}</p></div>`;
   }
   return renderTrackerEditControl(path, label, display, value, rootSchema);
+}
+
+function renderEditableChips(
+  path: TrackerEditPath,
+  label: string | null,
+  values: unknown[],
+  rootSchema: Record<string, unknown>,
+  centered: boolean,
+): string {
+  const labelMarkup = label ? `<span>${escapeHtml(label)}</span>` : "";
+  const chips = values.map((value, index) => {
+    const itemPath = [...path, index];
+    const schema = getTrackerSchemaAtPath(rootSchema, itemPath);
+    const kind = getTrackerEditControlKind(schema, value);
+    const common = `data-tracker-edit-control="true" data-tracker-edit-chip="true" data-edit-path="${trackerEditPathAttr(itemPath)}" data-edit-kind="${kind}" aria-label="${escapeAttr(`${label || "Item"} ${index + 1}`)}"`;
+    let control: string;
+    if (kind === "enum") {
+      const options = Array.isArray(schema.enum) ? schema.enum : [];
+      control = `<select ${common}>${options.map((option, optionIndex) => `<option value="${optionIndex}" ${jsonValuesEqual(option, value) ? "selected" : ""}>${escapeHtml(formatDisplayValue(option))}</option>`).join("")}</select>`;
+    } else if (kind === "boolean") {
+      control = `<select ${common}><option value="true" ${value === true ? "selected" : ""}>Yes</option><option value="false" ${value !== true ? "selected" : ""}>No</option></select>`;
+    } else {
+      const inputType = kind === "number" || kind === "integer" ? "number" : "text";
+      const size = Math.max(4, Math.min(24, formatDisplayValue(value).length + 1));
+      control = `<input type="${inputType}" ${common} size="${size}" ${kind === "integer" ? "step=\"1\"" : kind === "number" ? "step=\"any\"" : ""} value="${escapeAttr(value ?? "")}">`;
+    }
+    return `<span class="scenemap-edit-chip">${control}<button type="button" data-action="remove-tracker-chip" data-edit-path="${trackerEditPathAttr(path)}" data-edit-index="${index}" title="Remove item" aria-label="Remove ${escapeAttr(formatDisplayValue(value) || `item ${index + 1}`)}">×</button></span>`;
+  }).join("");
+  return `
+    <div class="scenemap-field scenemap-edit-chip-field">
+      ${labelMarkup}
+      <div class="scenemap-edit-chips ${centered ? "is-centered" : ""}">
+        ${chips}
+        <button type="button" class="scenemap-edit-chip-add" data-action="add-tracker-chip" data-edit-path="${trackerEditPathAttr(path)}" aria-label="Add item">+</button>
+      </div>
+    </div>
+  `;
 }
 
 function renderEditableCharacterCard(
@@ -3114,8 +3184,9 @@ function renderTrackerEditControl(
   } else if (kind.endsWith("_array")) {
     const lines = Array.isArray(value) ? value.map(formatDisplayValue).join("\n") : "";
     control = `<textarea ${common} rows="${Math.max(2, Math.min(5, Array.isArray(value) ? value.length : 2))}" placeholder="One item per line">${escapeHtml(lines)}</textarea>`;
-  } else if (display === "mono" || (typeof value === "string" && (value.length > 64 || value.includes("\n")))) {
-    control = `<textarea ${common} rows="${typeof value === "string" && value.length > 180 ? 4 : 3}">${escapeHtml(value ?? "")}</textarea>`;
+  } else if (display === "mono" || (typeof value === "string" && (value.length > 38 || value.includes("\n")))) {
+    const rows = typeof value === "string" && value.length > 220 ? 4 : typeof value === "string" && value.length > 110 ? 3 : 2;
+    control = `<textarea ${common} rows="${rows}">${escapeHtml(value ?? "")}</textarea>`;
   } else {
     control = `<input type="text" ${common} value="${escapeAttr(value ?? "")}">`;
   }
@@ -3364,9 +3435,8 @@ const styles = `
 .scenemap-character-grid { display: flex; flex-direction: column; gap: 14px; }
 .scenemap-character { border: 1px solid var(--lumiverse-primary-020, var(--lumiverse-border)); background: color-mix(in srgb, var(--lumiverse-fill) 82%, var(--lumiverse-primary, var(--lumiverse-accent)) 6%); border-radius: var(--lumiverse-radius, 8px); padding: 10px; }
 .scenemap-character h4 { margin: 0 0 10px; color: color-mix(in srgb, var(--lumiverse-text) 72%, var(--lumiverse-primary, var(--lumiverse-accent)) 28%); font-size: 14px; font-weight: 760; }
-.scenemap-board.is-editing { border-color: color-mix(in srgb, var(--lumiverse-primary, var(--lumiverse-accent)) 24%, transparent); }
 .scenemap-edit-field > input, .scenemap-edit-field > textarea, .scenemap-edit-field > select, .scenemap-character-name-edit > input, .scenemap-character-name-edit > textarea, .scenemap-character-name-edit > select { width: 100%; box-sizing: border-box; border: 1px solid var(--lumiverse-border); border-radius: var(--lumiverse-radius-sm, 5px); background: var(--lumiverse-secondary, rgba(128, 128, 128, .15)); color: var(--lumiverse-text); padding: 8px 9px; font: inherit; font-size: 13px; line-height: 1.4; }
-.scenemap-edit-field > textarea { min-height: 62px; resize: vertical; }
+.scenemap-edit-field > textarea { min-height: 42px; max-height: 180px; resize: vertical; field-sizing: content; }
 .scenemap-edit-field > select, .scenemap-character-name-edit > select { appearance: auto; }
 .scenemap-edit-field > input:focus, .scenemap-edit-field > textarea:focus, .scenemap-edit-field > select:focus, .scenemap-character-name-edit > input:focus, .scenemap-character-name-edit > textarea:focus, .scenemap-character-name-edit > select:focus { outline: none; border-color: var(--lumiverse-primary, var(--lumiverse-accent)); box-shadow: 0 0 0 1px var(--lumiverse-primary-020, transparent); }
 .scenemap-character-edit { display: flex; flex-direction: column; }
@@ -3375,6 +3445,16 @@ const styles = `
 .scenemap-character-name-edit > span { color: var(--lumiverse-text-muted); font-size: 10px; font-weight: 700; text-transform: uppercase; }
 .scenemap-character-name-edit > input { color: color-mix(in srgb, var(--lumiverse-text) 72%, var(--lumiverse-primary, var(--lumiverse-accent)) 28%); font-size: 14px; font-weight: 760; }
 .scenemap-lv .scenemap-edit-remove-card { flex: 0 0 auto; width: 34px; height: 34px; color: var(--lumiverse-danger, #ef4444); }
+.scenemap-edit-chip-field { gap: 6px; }
+.scenemap-edit-chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.scenemap-edit-chips.is-centered { justify-content: center; }
+.scenemap-edit-chip { display: inline-flex; min-width: 0; align-items: stretch; overflow: hidden; border: 1px solid var(--lumiverse-primary-020, var(--lumiverse-border)); border-radius: var(--lumiverse-radius, 8px); background: color-mix(in srgb, var(--lumiverse-fill) 82%, var(--lumiverse-primary, var(--lumiverse-accent)) 6%); }
+.scenemap-edit-chip > input, .scenemap-edit-chip > select { width: auto; min-width: 42px; max-width: 180px; box-sizing: border-box; border: 0; outline: none; background: transparent; color: var(--lumiverse-text); padding: 5px 4px 5px 8px; font: inherit; font-size: 12px; font-weight: 600; }
+.scenemap-edit-chip > input:focus, .scenemap-edit-chip > select:focus { background: var(--lumiverse-primary-010, color-mix(in srgb, var(--lumiverse-primary, var(--lumiverse-accent)) 10%, transparent)); }
+.scenemap-lv .scenemap-edit-chip > button { width: 28px; min-width: 28px; padding: 0; border: 0; border-left: 1px solid color-mix(in srgb, var(--lumiverse-border) 70%, transparent); border-radius: 0; background: transparent; color: var(--lumiverse-text-dim); font-size: 16px; line-height: 1; }
+.scenemap-lv .scenemap-edit-chip > button:hover:not(:disabled) { color: var(--lumiverse-danger, #ef4444); background: var(--lumiverse-danger-015, rgba(239, 68, 68, .15)); }
+.scenemap-lv .scenemap-edit-chip-add { width: 30px; height: 30px; padding: 0; border-style: dashed; border-radius: var(--lumiverse-radius, 8px); background: transparent; color: var(--lumiverse-text-muted); }
+.scenemap-lv .scenemap-edit-chip-add:hover:not(:disabled) { color: var(--lumiverse-primary, var(--lumiverse-accent)); border-color: var(--lumiverse-primary, var(--lumiverse-accent)); }
 .scenemap-edit-card-list { display: flex; flex-direction: column; gap: 10px; }
 .scenemap-lv .scenemap-edit-add-card { width: 100%; padding: 8px 10px; border-style: dashed; color: var(--lumiverse-text-muted); background: transparent; }
 .scenemap-lv .scenemap-edit-add-card:hover:not(:disabled) { color: var(--lumiverse-primary, var(--lumiverse-accent)); border-color: var(--lumiverse-primary, var(--lumiverse-accent)); }
