@@ -64,7 +64,7 @@ let topToolbarObserver: MutationObserver | null = null;
 let topToolbarObservationRoot: Element | null = null;
 let topToolbarEnsureQueued = false;
 let topToolbarTapTimer: ReturnType<typeof setTimeout> | null = null;
-let topToolbarLastPointerActivation = Number.NEGATIVE_INFINITY;
+let topToolbarSuppressClickUntil = Number.NEGATIVE_INFINITY;
 let tabHandle: ReturnType<SpindleFrontendContext["ui"]["registerDrawerTab"]> | null = null;
 let dockPanelHandle: ReturnType<SpindleFrontendContext["ui"]["requestDockPanel"]> | null = null;
 let dockResizeObserver: MutationObserver | null = null;
@@ -129,7 +129,8 @@ const pendingTextEditors = new Map<string, PendingTextEditor>();
 const settingsDraft = new SettingsDraftTracker();
 const automaticSettingsDraft = new AutomaticSettingsDraftTracker<SceneMapSettings>();
 const GENERATION_REQUEST_TIMEOUT_MS = 10_000;
-const TOP_TOOLBAR_DOUBLE_TAP_MS = 280;
+const TOP_TOOLBAR_DOUBLE_CLICK_MS = 280;
+const TOP_TOOLBAR_DOUBLE_TOUCH_MS = 440;
 
 const iconSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l-6 3V6l6-3 6 3 6-3v15l-6 3-6-3z"/><path d="M9 3v15"/><path d="M15 6v15"/></svg>`;
 
@@ -2287,6 +2288,7 @@ function ensureTopToolbarInjection() {
   );
   topToolbarInjection.addEventListener("click", handleTopToolbarClick);
   topToolbarInjection.addEventListener("pointerup", handleTopToolbarPointerUp);
+  topToolbarInjection.addEventListener("keydown", handleTopToolbarKeydown);
   renderTopToolbarButton();
 }
 
@@ -2321,30 +2323,40 @@ function handleTopToolbarPointerUp(event: Event) {
   const pointerEvent = event as PointerEvent;
   const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-scenemap-top-toolbar-button]");
   if (!button || button.disabled || !pointerEvent.isPrimary || pointerEvent.button !== 0) return;
-  topToolbarLastPointerActivation = performance.now();
-  scheduleTopToolbarTap();
+  // Mobile WebViews may synthesize a click with detail=0 after a touch. Suppress
+  // every click following a real pointer event instead of treating detail=0 as
+  // proof of keyboard activation.
+  topToolbarSuppressClickUntil = performance.now() + 800;
+  const delay = pointerEvent.pointerType === "touch" || pointerEvent.pointerType === "pen"
+    ? TOP_TOOLBAR_DOUBLE_TOUCH_MS
+    : TOP_TOOLBAR_DOUBLE_CLICK_MS;
+  scheduleTopToolbarTap(delay);
 }
 
 function handleTopToolbarClick(event: Event) {
   const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-scenemap-top-toolbar-button]");
   if (!button || button.disabled) return;
-  const clickEvent = event as MouseEvent;
-  // Pointer activations are handled on pointerup so touch and mouse share the
-  // same double-tap window. Keep click for keyboard and assistive activation.
-  if (clickEvent.detail !== 0 && performance.now() - topToolbarLastPointerActivation < 700) {
+  // Pointer activations are already handled on pointerup. This click path is a
+  // fallback for assistive technology and browsers without Pointer Events.
+  if (performance.now() < topToolbarSuppressClickUntil) {
     event.preventDefault();
     return;
   }
-  if (clickEvent.detail === 0) {
-    if (topToolbarTapTimer) clearTimeout(topToolbarTapTimer);
-    topToolbarTapTimer = null;
-    runTopToolbarPrimaryAction();
-    return;
-  }
-  scheduleTopToolbarTap();
+  scheduleTopToolbarTap(TOP_TOOLBAR_DOUBLE_CLICK_MS);
 }
 
-function scheduleTopToolbarTap() {
+function handleTopToolbarKeydown(event: Event) {
+  const keyboardEvent = event as KeyboardEvent;
+  const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-scenemap-top-toolbar-button]");
+  if (!button || button.disabled || (keyboardEvent.key !== "Enter" && keyboardEvent.key !== " ")) return;
+  event.preventDefault();
+  topToolbarSuppressClickUntil = performance.now() + 800;
+  if (topToolbarTapTimer) clearTimeout(topToolbarTapTimer);
+  topToolbarTapTimer = null;
+  runTopToolbarPrimaryAction();
+}
+
+function scheduleTopToolbarTap(delay: number) {
   if (topToolbarTapTimer) {
     clearTimeout(topToolbarTapTimer);
     topToolbarTapTimer = null;
@@ -2354,7 +2366,7 @@ function scheduleTopToolbarTap() {
   topToolbarTapTimer = setTimeout(() => {
     topToolbarTapTimer = null;
     runTopToolbarPrimaryAction();
-  }, TOP_TOOLBAR_DOUBLE_TAP_MS);
+  }, delay);
 }
 
 function runTopToolbarPrimaryAction() {
@@ -2407,10 +2419,11 @@ function clearTopToolbarInjection() {
   topToolbarInjection = null;
   if (topToolbarTapTimer) clearTimeout(topToolbarTapTimer);
   topToolbarTapTimer = null;
-  topToolbarLastPointerActivation = Number.NEGATIVE_INFINITY;
+  topToolbarSuppressClickUntil = Number.NEGATIVE_INFINITY;
   if (!injection) return;
   injection.removeEventListener("click", handleTopToolbarClick);
   injection.removeEventListener("pointerup", handleTopToolbarPointerUp);
+  injection.removeEventListener("keydown", handleTopToolbarKeydown);
   ctxRef?.dom.uninject(injection);
 }
 
