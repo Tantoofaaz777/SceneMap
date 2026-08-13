@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
   DEFAULT_SCHEMA_VALUE,
+  DEFAULT_SYSTEM_PROMPT,
+  getPresetSystemPrompt,
+  getPresetUserPrompt,
   jsonValuesEqual,
   mergeAutomaticSettingsPatch,
   mergePresetSettings,
@@ -173,6 +176,37 @@ describe("mergeSettings", () => {
     expect(settings.trackerPlacement).toBe("dock");
     expect(mergeSettings({ trackerPlacement: "drawer" }).trackerPlacement).toBe("drawer");
   });
+
+  test("migrates a legacy single prompt and history limit without losing either", () => {
+    const settings = mergeSettings({
+      includeLastXMessages: 7,
+      promptJson: "Legacy instructions with {{schema}}",
+      schemaPresets: {
+        default: { name: "Legacy", value: DEFAULT_SCHEMA_VALUE },
+      },
+    });
+
+    expect(getPresetSystemPrompt(settings)).toBe(DEFAULT_SYSTEM_PROMPT);
+    expect(getPresetUserPrompt(settings)).toContain("{{scenemap_chat_history::7}}");
+    expect(getPresetUserPrompt(settings)).toContain("Legacy instructions with {{schema}}");
+    expect(getPresetUserPrompt(settings)).toContain("{{scenemap_partial_task}}");
+  });
+
+  test("preserves intentionally empty split prompts", () => {
+    const settings = mergeSettings({
+      schemaPresets: {
+        default: {
+          name: "Split",
+          value: DEFAULT_SCHEMA_VALUE,
+          systemPrompt: "",
+          userPrompt: "Only user content",
+        },
+      },
+    });
+
+    expect(getPresetSystemPrompt(settings)).toBe("");
+    expect(getPresetUserPrompt(settings)).toBe("Only user content");
+  });
 });
 
 describe("split settings persistence", () => {
@@ -218,7 +252,8 @@ describe("split settings persistence", () => {
         ...current.schemaPresets,
         default: {
           ...current.schemaPresets.default,
-          promptJson: "Updated prompt",
+          systemPrompt: "Updated system prompt",
+          userPrompt: "Updated user prompt",
         },
       },
     });
@@ -229,7 +264,8 @@ describe("split settings persistence", () => {
     expect(next.showInputBarButton).toBe(false);
     expect(next.showTopToolbarButton).toBe(true);
     expect(next.trackerPlacement).toBe("drawer");
-    expect(next.schemaPresets.default.promptJson).toBe("Updated prompt");
+    expect(next.schemaPresets.default.systemPrompt).toBe("Updated system prompt");
+    expect(next.schemaPresets.default.userPrompt).toBe("Updated user prompt");
   });
 });
 

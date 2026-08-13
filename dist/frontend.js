@@ -2196,6 +2196,27 @@ Sortable.mount(new AutoScrollPlugin);
 Sortable.mount(Remove, Revert);
 var sortable_esm_default = Sortable;
 
+// src/prompt-templates.ts
+var SCENEMAP_PROMPT_MACROS = [
+  { token: "{{scenemap_context}}", description: "Character, persona, scenario and active World Info, with separators." },
+  { token: "{{scenemap_character}}", description: "Character description and personality." },
+  { token: "{{scenemap_persona}}", description: "Active persona description." },
+  { token: "{{scenemap_scenario}}", description: "Character scenario." },
+  { token: "{{scenemap_world_info}}", description: "Active World Book entries." },
+  { token: "{{scenemap_chat_history::N}}", description: "Last N messages in chronological order, separated by a blank line. Omit ::N for all." },
+  { token: "{{scenemap_schema}}", description: "Configured tracker schema." },
+  { token: "{{scenemap_response_schema}}", description: "Schema expected for this operation, including partial regeneration." },
+  { token: "{{scenemap_previous_tracker}}", description: "Tracker used as the continuity baseline." },
+  { token: "{{scenemap_example_response}}", description: "Automatically generated schema example." },
+  { token: "{{scenemap_example_section}}", description: "Complete example section, or empty when no valid example is available." },
+  { token: "{{scenemap_mode}}", description: 'Current operation: "full" or "partial".' },
+  { token: "{{scenemap_selected_fields}}", description: "Fields selected for partial regeneration, otherwise empty." },
+  { token: "{{scenemap_partial_task}}", description: "Partial-regeneration contract, otherwise empty." }
+];
+function chatHistoryMacro(limit) {
+  return limit > 0 ? `{{scenemap_chat_history::${Math.floor(limit)}}}` : "{{scenemap_chat_history}}";
+}
+
 // src/shared.ts
 var DEFAULT_SCHEMA_VALUE = {
   $schema: "http://json-schema.org/draft-07/schema#",
@@ -2328,16 +2349,23 @@ CRITICAL INSTRUCTIONS:
 
 JSON SCHEMA TO FOLLOW:
 \`\`\`json
-{{schema}}
+{{scenemap_response_schema}}
 \`\`\`
 
 PREVIOUS TRACKER TO UPDATE:
 If this object is not empty, use it as the baseline and update it instead of starting from scratch. Preserve unchanged fields unless recent chat messages clearly changed them.
 \`\`\`json
-{{previous_tracker}}
+{{scenemap_previous_tracker}}
 \`\`\`
 
-{{example_section}}`;
+{{scenemap_example_section}}`;
+var DEFAULT_SYSTEM_PROMPT = "{{scenemap_context}}";
+var DEFAULT_USER_PROMPT = `{{scenemap_chat_history}}
+
+>>> Instructions <<<
+${DEFAULT_PROMPT_JSON}
+
+{{scenemap_partial_task}}`;
 var defaultSettings = {
   version: "1.0.1",
   formatVersion: "F_1.0",
@@ -2354,7 +2382,9 @@ var defaultSettings = {
   schemaPresets: {
     default: {
       name: "Default",
-      value: DEFAULT_SCHEMA_VALUE
+      value: DEFAULT_SCHEMA_VALUE,
+      systemPrompt: DEFAULT_SYSTEM_PROMPT,
+      userPrompt: DEFAULT_USER_PROMPT
     }
   },
   includeLastXMessages: 0,
@@ -2370,10 +2400,20 @@ function mergeSettings(value) {
     return base;
   const currentValue = { ...value };
   delete currentValue.showMessageButtons;
-  const schemaPresets = {
+  const mergedPresets = {
     ...base.schemaPresets,
     ...currentValue.schemaPresets ?? {}
   };
+  const legacyPrompt = typeof currentValue.promptJson === "string" ? currentValue.promptJson : base.promptJson;
+  const legacyHistoryLimit = typeof currentValue.includeLastXMessages === "number" && Number.isFinite(currentValue.includeLastXMessages) ? Math.max(0, Math.floor(currentValue.includeLastXMessages)) : base.includeLastXMessages;
+  const schemaPresets = Object.fromEntries(Object.entries(mergedPresets).map(([key, preset]) => {
+    const presetLegacyPrompt = typeof preset.promptJson === "string" ? preset.promptJson : legacyPrompt;
+    return [key, {
+      ...preset,
+      systemPrompt: typeof preset.systemPrompt === "string" ? preset.systemPrompt : DEFAULT_SYSTEM_PROMPT,
+      userPrompt: typeof preset.userPrompt === "string" ? preset.userPrompt : migrateLegacyUserPrompt(presetLegacyPrompt, legacyHistoryLimit)
+    }];
+  }));
   return {
     ...base,
     ...currentValue,
@@ -2391,6 +2431,24 @@ function mergeSettings(value) {
 function getPresetPrompt(settings, presetKey = settings.schemaPreset) {
   const preset = settings.schemaPresets[presetKey] ?? settings.schemaPresets[settings.schemaPreset] ?? settings.schemaPresets.default;
   return typeof preset?.promptJson === "string" ? preset.promptJson : settings.promptJson;
+}
+function getPresetSystemPrompt(settings, presetKey = settings.schemaPreset) {
+  const preset = settings.schemaPresets[presetKey] ?? settings.schemaPresets[settings.schemaPreset] ?? settings.schemaPresets.default;
+  return typeof preset?.systemPrompt === "string" ? preset.systemPrompt : DEFAULT_SYSTEM_PROMPT;
+}
+function getPresetUserPrompt(settings, presetKey = settings.schemaPreset) {
+  const preset = settings.schemaPresets[presetKey] ?? settings.schemaPresets[settings.schemaPreset] ?? settings.schemaPresets.default;
+  if (typeof preset?.userPrompt === "string")
+    return preset.userPrompt;
+  return migrateLegacyUserPrompt(getPresetPrompt(settings, presetKey), settings.includeLastXMessages);
+}
+function migrateLegacyUserPrompt(prompt, includeLastXMessages) {
+  return `${chatHistoryMacro(includeLastXMessages)}
+
+>>> Instructions <<<
+${prompt}
+
+{{scenemap_partial_task}}`;
 }
 function getPresetLayout(settings, presetKey = settings.schemaPreset) {
   const preset = settings.schemaPresets[presetKey] ?? settings.schemaPresets[settings.schemaPreset] ?? settings.schemaPresets.default;
@@ -4603,6 +4661,9 @@ function renderDrawerSettings() {
   const activePreset = settings.schemaPresets[settings.schemaPreset] ?? settings.schemaPresets.default;
   const presetDraft = getPresetEditorDraft(settings, settings.schemaPreset);
   const drawerTrackerMode = settings.trackerPlacement === "drawer";
+  const promptMacroReference = SCENEMAP_PROMPT_MACROS.map((macro) => `
+    <li><code>${escapeHtml(macro.token)}</code><span>${escapeHtml(macro.description)}</span></li>
+  `).join("");
   const settingsMarkup = `
     <div class="scenemap-shell scenemap-settings-shell">
       <section class="scenemap-settings-scroll">
@@ -4639,10 +4700,6 @@ function renderDrawerSettings() {
           <input type="number" min="0" max="1" step="0.05" data-setting="topP" value="${settings.topP ?? ""}" placeholder="1">
         </label>
       </div>
-      <label>
-        <span>Include last messages</span>
-        <div class="scenemap-native-select" data-native-setting="includeLastXMessages"></div>
-      </label>
         </div>
         <div class="scenemap-settings-group">
           <h3>Interface</h3>
@@ -4691,12 +4748,24 @@ function renderDrawerSettings() {
             </label>
             <div class="scenemap-inline-error scenemap-preset-schema-error" role="alert" data-preset-schema-error ${presetDraft.schemaError ? "" : "hidden"}>${escapeHtml(presetDraft.schemaError ?? "")}</div>
             <label>
-              <span>Prompt</span>
+              <span>System prompt</span>
               <div class="scenemap-expandable-textarea">
-                <textarea data-preset-editor="prompt" aria-label="Prompt for ${escapeAttr(activePreset.name)}" placeholder="Write the SceneMap generation prompt. Macros like {{schema}} are supported.">${escapeHtml(presetDraft.promptText)}</textarea>
-                ${expandEditorButton("prompt")}
+                <textarea data-preset-editor="systemPrompt" aria-label="System prompt for ${escapeAttr(activePreset.name)}" placeholder="System instructions and reference context.">${escapeHtml(presetDraft.systemPromptText)}</textarea>
+                ${expandEditorButton("systemPrompt")}
               </div>
             </label>
+            <label>
+              <span>User prompt</span>
+              <div class="scenemap-expandable-textarea">
+                <textarea data-preset-editor="userPrompt" aria-label="User prompt for ${escapeAttr(activePreset.name)}" placeholder="Chat history and tracker instructions.">${escapeHtml(presetDraft.userPromptText)}</textarea>
+                ${expandEditorButton("userPrompt")}
+              </div>
+            </label>
+            <details class="scenemap-macro-reference">
+              <summary>SceneMap macros</summary>
+              <p>Lumiverse macros such as <code>{{char}}</code> and <code>{{user}}</code> also work.</p>
+              <ul>${promptMacroReference}</ul>
+            </details>
             <div class="scenemap-preset-layout-row">
               <button class="scenemap-pill-action" data-action="edit-layout">Layout</button>
               <button class="scenemap-pill-action scenemap-primary" data-action="save-preset" data-save-preset ${settingsDraft.saving || !settingsDraft.dirty ? "disabled" : ""}>${settingsDraft.saving ? "Saving..." : "Save preset"}</button>
@@ -4729,7 +4798,7 @@ function mountSettingsSelects(settings) {
       value,
       portal: true,
       triggerClassName: "scenemap-secondary-control",
-      ariaLabel: key === "connectionId" ? "Connection" : key === "schemaPreset" ? "Global preset" : key === "trackerPlacement" ? "Tracker location" : "Include last messages",
+      ariaLabel: key === "connectionId" ? "Connection" : key === "schemaPreset" ? "Global preset" : "Tracker location",
       onChange: (nextValue) => updateNativeSetting(key, nextValue),
       ...extra
     }));
@@ -4744,10 +4813,6 @@ function mountSettingsSelects(settings) {
     clearLabel: "Default active connection",
     searchPlaceholder: "Search connections..."
   });
-  mount2("includeLastXMessages", [
-    { value: "0", label: "All messages up to target" },
-    ...Array.from({ length: 20 }, (_, index2) => ({ value: String(index2 + 1), label: `Last ${index2 + 1}` }))
-  ], String(settings.includeLastXMessages), { searchThreshold: Number.MAX_SAFE_INTEGER });
   mount2("trackerPlacement", [
     { value: "dock", label: "Dock panel" },
     { value: "drawer", label: "Drawer" }
@@ -4768,9 +4833,7 @@ function presetSelectOptions(settings) {
 }
 function updateNativeSetting(key, value) {
   const settings = mergeSettings(state.settings);
-  if (key === "includeLastXMessages")
-    settings.includeLastXMessages = Math.max(0, Math.floor(Number(value) || 0));
-  else if (key === "trackerPlacement")
+  if (key === "trackerPlacement")
     settings.trackerPlacement = value === "drawer" ? "drawer" : "dock";
   else
     settings[key] = value;
@@ -4892,8 +4955,9 @@ function handleClick(event) {
   if (action === "expand-preset-editor") {
     event.preventDefault();
     const editor = button.dataset.editor;
-    if (editor === "schema" || editor === "prompt")
+    if (editor === "schema" || editor === "systemPrompt" || editor === "userPrompt") {
       openPresetExpandedEditor(editor);
+    }
   }
   if (action === "generate") {
     const command = getGenerationButtonCommand(state.generationActive, isGenerationRequestPending);
@@ -5311,7 +5375,8 @@ function getPresetEditorDraft(settings, key) {
   const preset = settings.schemaPresets[key] ?? settings.schemaPresets.default;
   const draft = {
     schemaText: JSON.stringify(preset.value, null, 2),
-    promptText: getPresetPrompt(settings, key),
+    systemPromptText: getPresetSystemPrompt(settings, key),
+    userPromptText: getPresetUserPrompt(settings, key),
     schemaError: null
   };
   presetEditorDrafts.set(key, draft);
@@ -5333,7 +5398,7 @@ function parseSchemaEditorText(text) {
 }
 function updatePresetEditorControl(target) {
   const editor = target.dataset.presetEditor;
-  if (editor !== "schema" && editor !== "prompt")
+  if (editor !== "schema" && editor !== "systemPrompt" && editor !== "userPrompt")
     return;
   updatePresetEditorValue(editor, target.value);
 }
@@ -5342,11 +5407,16 @@ function updatePresetEditorValue(editor, value) {
   const key = settings.schemaPreset;
   const preset = settings.schemaPresets[key] ?? settings.schemaPresets.default;
   const draft = getPresetEditorDraft(settings, key);
-  if (editor === "prompt") {
-    draft.promptText = value;
-    const nextPrompt = value || DEFAULT_PROMPT_JSON;
-    if (nextPrompt !== getPresetPrompt(settings, key)) {
-      settings.schemaPresets[key] = { ...preset, promptJson: nextPrompt };
+  if (editor === "systemPrompt" || editor === "userPrompt") {
+    const isSystem = editor === "systemPrompt";
+    const nextPrompt = value;
+    if (isSystem)
+      draft.systemPromptText = value;
+    else
+      draft.userPromptText = value;
+    const currentPrompt = isSystem ? getPresetSystemPrompt(settings, key) : getPresetUserPrompt(settings, key);
+    if (nextPrompt !== currentPrompt) {
+      settings.schemaPresets[key] = isSystem ? { ...preset, systemPrompt: nextPrompt } : { ...preset, userPrompt: nextPrompt };
       updateSettingsDraft(settings);
     } else {
       refreshSettingsDraftFingerprint(settings);
@@ -5369,6 +5439,7 @@ function updatePresetEditorValue(editor, value) {
   }
 }
 function expandEditorButton(editor) {
+  const label = editor === "schema" ? "Schema JSON" : editor === "systemPrompt" ? "System prompt" : "User prompt";
   return `
     <button
       type="button"
@@ -5376,7 +5447,7 @@ function expandEditorButton(editor) {
       data-action="expand-preset-editor"
       data-editor="${editor}"
       title="Expand editor"
-      aria-label="Expand ${editor === "schema" ? "Schema JSON" : "Prompt"} editor"
+      aria-label="Expand ${label} editor"
     >
       <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M15 3h6v6"/><path d="m21 3-7 7"/><path d="m3 21 7-7"/><path d="M9 21H3v-6"/>
@@ -5387,8 +5458,8 @@ function expandEditorButton(editor) {
 function openPresetExpandedEditor(editor) {
   const settings = mergeSettings(state.settings);
   const draft = getPresetEditorDraft(settings, settings.schemaPreset);
-  const title = editor === "schema" ? "SceneMap Schema JSON" : "SceneMap Prompt";
-  const value = editor === "schema" ? draft.schemaText : draft.promptText;
+  const title = editor === "schema" ? "SceneMap Schema JSON" : editor === "systemPrompt" ? "SceneMap System Prompt" : "SceneMap User Prompt";
+  const value = editor === "schema" ? draft.schemaText : editor === "systemPrompt" ? draft.systemPromptText : draft.userPromptText;
   openTextEditor(title, value, (nextValue) => {
     updatePresetEditorValue(editor, nextValue);
     renderDrawerSettings();
@@ -5413,7 +5484,8 @@ function applyPresetEditorDraft(settings, key) {
     settings.schemaPresets[key] = {
       ...preset,
       value: schema,
-      promptJson: draft.promptText || DEFAULT_PROMPT_JSON
+      systemPrompt: draft.systemPromptText,
+      userPrompt: draft.userPromptText
     };
   } catch (error) {
     draft.schemaError = error.message;
@@ -5534,7 +5606,7 @@ function trackerEditPathAttr(path) {
   return escapeAttr(JSON.stringify(path));
 }
 function isAutomaticallySavedSetting(key) {
-  return key === "connectionId" || key === "autoGenerateAiTrackers" || key === "autoGenerateInterval" || key === "maxResponseTokens" || key === "temperature" || key === "topP" || key === "includeLastXMessages" || key === "showInputBarButton" || key === "showTopToolbarButton" || key === "trackerPlacement";
+  return key === "connectionId" || key === "autoGenerateAiTrackers" || key === "autoGenerateInterval" || key === "maxResponseTokens" || key === "temperature" || key === "topP" || key === "showInputBarButton" || key === "showTopToolbarButton" || key === "trackerPlacement";
 }
 function updateSettingFromControl(target, key, immediate) {
   const settings = mergeSettings(state.settings);
@@ -5565,8 +5637,6 @@ function updateSettingFromControl(target, key, immediate) {
     settings.maxResponseTokens = normalized;
     if (value === "" || Number(value) !== normalized)
       target.value = String(normalized);
-  } else if (key === "includeLastXMessages") {
-    settings.includeLastXMessages = Math.max(0, Math.floor(Number(target.value) || 0));
   } else {
     settings[key] = target.value;
   }
@@ -5595,7 +5665,8 @@ function createPreset() {
     settings.schemaPresets[key] = {
       name,
       value: JSON.parse(JSON.stringify(activePreset.value)),
-      promptJson: getPresetPrompt(settings),
+      systemPrompt: getPresetSystemPrompt(settings),
+      userPrompt: getPresetUserPrompt(settings),
       displayLayout: cloneLayout(getPresetLayout(settings))
     };
     updateSettingsDraft({ ...settings, schemaPreset: key });
@@ -5642,10 +5713,11 @@ function exportPreset() {
   const preset = settings.schemaPresets[settings.schemaPreset] ?? settings.schemaPresets.default;
   const data = {
     type: "scenemap-preset",
-    version: 1,
+    version: 2,
     name: preset.name,
     schema: preset.value,
-    prompt: getPresetPrompt(settings),
+    systemPrompt: getPresetSystemPrompt(settings),
+    userPrompt: getPresetUserPrompt(settings),
     layout: getPresetLayout(settings)
   };
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
@@ -5680,7 +5752,8 @@ async function importPreset() {
       settings.schemaPresets[key] = {
         name,
         value: imported.schema,
-        promptJson: imported.prompt,
+        systemPrompt: imported.systemPrompt,
+        userPrompt: imported.userPrompt,
         displayLayout: imported.layout
       };
       settings.schemaPreset = key;
@@ -5699,14 +5772,20 @@ function parsePresetImport(value, filename) {
   if (Object.keys(schema).length === 0)
     throw new Error("Preset file is missing a schema object.");
   validateSchemaDefinition(schema);
-  if (typeof record.prompt !== "string")
+  const isVersionTwo = Number(record.version) >= 2;
+  if (isVersionTwo && (typeof record.systemPrompt !== "string" || typeof record.userPrompt !== "string")) {
+    throw new Error("Preset file is missing its System or User prompt.");
+  }
+  if (!isVersionTwo && typeof record.prompt !== "string") {
     throw new Error("Preset file is missing a prompt string.");
+  }
   const layout = normalizeImportedLayout(record.layout);
   validateLayout(layout, extractSchemaFieldOptions(schema));
   return {
     name: typeof record.name === "string" && record.name.trim() ? record.name.trim() : filename.replace(/\.json$/i, "").replace(/\.scenemap-preset$/i, ""),
     schema,
-    prompt: record.prompt,
+    systemPrompt: isVersionTwo ? record.systemPrompt : DEFAULT_SYSTEM_PROMPT,
+    userPrompt: isVersionTwo ? record.userPrompt : migrateLegacyUserPrompt(record.prompt, 0),
     layout
   };
 }
@@ -7212,9 +7291,15 @@ var styles = `
   .scenemap-lv .scenemap-expand-editor-btn { opacity: 1; }
 }
 .scenemap-preset-editor textarea { width: 100%; min-height: 180px; box-sizing: border-box; resize: vertical; border: 1px solid var(--lumiverse-border); border-radius: var(--lumiverse-radius, 8px); background: var(--lumiverse-secondary, rgba(128, 128, 128, .15)); color: var(--lumiverse-text); padding: 10px 11px; font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
-.scenemap-preset-editor textarea[data-preset-editor="prompt"] { min-height: 150px; font-family: inherit; }
+.scenemap-preset-editor textarea[data-preset-editor="systemPrompt"], .scenemap-preset-editor textarea[data-preset-editor="userPrompt"] { min-height: 150px; font-family: inherit; }
 .scenemap-preset-editor textarea:focus { outline: none; border-color: var(--lumiverse-primary, var(--lumiverse-accent)); box-shadow: 0 0 0 1px var(--lumiverse-primary-020, transparent); }
 .scenemap-preset-schema-error { margin-top: -4px; }
+.scenemap-macro-reference { border: 1px solid var(--lumiverse-border); border-radius: var(--lumiverse-radius, 8px); background: var(--lumiverse-secondary, rgba(128, 128, 128, .15)); padding: 8px 10px; color: var(--lumiverse-text-muted); font-size: 11px; }
+.scenemap-macro-reference summary { color: var(--lumiverse-text); cursor: pointer; font-weight: 650; }
+.scenemap-macro-reference p { margin: 9px 0; line-height: 1.45; }
+.scenemap-macro-reference ul { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; }
+.scenemap-macro-reference li { display: grid; grid-template-columns: minmax(185px, auto) 1fr; gap: 8px; align-items: baseline; }
+.scenemap-macro-reference code { color: var(--lumiverse-primary-text, var(--lumiverse-primary)); overflow-wrap: anywhere; }
 .scenemap-preset-layout-row { display: flex; justify-content: flex-end; gap: 8px; }
 .scenemap-preset-layout-row .scenemap-primary { min-width: 112px; }
 .scenemap-settings-shell input:not([type="checkbox"]), .scenemap-editor textarea, .scenemap-layout-editor input, .scenemap-name-editor input {
@@ -7303,6 +7388,7 @@ body.scenemap-layout-is-dragging, body.scenemap-layout-is-dragging * { cursor: g
 .scenemap-runtime-error, .scenemap-inline-error { border: 1px solid rgba(255, 100, 100, 0.45); color: #ffb8b8; background: rgba(120, 0, 0, 0.18); border-radius: var(--lumiverse-radius, 8px); padding: 10px; font-size: 12px; }
 .scenemap-sr-only { position: absolute !important; width: 1px !important; height: 1px !important; padding: 0 !important; margin: -1px !important; overflow: hidden !important; clip: rect(0, 0, 0, 0) !important; white-space: nowrap !important; border: 0 !important; }
 @media (max-width: 760px) {
+  .scenemap-macro-reference li { grid-template-columns: minmax(0, 1fr); gap: 2px; }
   .scenemap-layout-section-header { grid-template-columns: minmax(0, 1fr) auto; align-items: end; }
   .scenemap-layout-section-header .scenemap-layout-actions { grid-column: 2; flex-wrap: nowrap; }
   .scenemap-layout-section-header .scenemap-layout-icon-btn, .scenemap-layout-section-header .scenemap-layout-drag-handle { width: 44px; height: 44px; min-width: 44px; }

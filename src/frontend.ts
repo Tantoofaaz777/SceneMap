@@ -2,14 +2,16 @@ import type { SpindleFrontendContext, SpindleSelectHandle, SpindleSelectOption }
 import Sortable from "sortablejs";
 import {
   DEFAULT_DISPLAY_LAYOUT,
-  DEFAULT_PROMPT_JSON,
+  DEFAULT_SYSTEM_PROMPT,
   DEFAULT_SCHEMA_VALUE,
   defaultSettings,
   formatPrimitive,
   getPresetLayout,
-  getPresetPrompt,
+  getPresetSystemPrompt,
+  getPresetUserPrompt,
   humanizeTrackerKey,
   jsonValuesEqual,
+  migrateLegacyUserPrompt,
   mergeSettings,
   schemaFingerprint,
   type SceneMapSettings,
@@ -40,6 +42,7 @@ import {
   type TrackerEditControlKind,
   type TrackerEditPath,
 } from "./tracker-inline-edit";
+import { SCENEMAP_PROMPT_MACROS } from "./prompt-templates";
 
 let state: SceneMapState = {
   settings: defaultSettings,
@@ -106,16 +109,18 @@ type AutomaticallySavedSetting =
   | "maxResponseTokens"
   | "temperature"
   | "topP"
-  | "includeLastXMessages"
   | "showInputBarButton"
   | "showTopToolbarButton"
   | "trackerPlacement";
 
 type PresetEditorDraft = {
   schemaText: string;
-  promptText: string;
+  systemPromptText: string;
+  userPromptText: string;
   schemaError: string | null;
 };
+
+type PresetTextEditor = "schema" | "systemPrompt" | "userPrompt";
 
 const presetEditorDrafts = new Map<string, PresetEditorDraft>();
 
@@ -720,6 +725,9 @@ function renderDrawerSettings() {
   const activePreset = settings.schemaPresets[settings.schemaPreset] ?? settings.schemaPresets.default;
   const presetDraft = getPresetEditorDraft(settings, settings.schemaPreset);
   const drawerTrackerMode = settings.trackerPlacement === "drawer";
+  const promptMacroReference = SCENEMAP_PROMPT_MACROS.map((macro) => `
+    <li><code>${escapeHtml(macro.token)}</code><span>${escapeHtml(macro.description)}</span></li>
+  `).join("");
   const settingsMarkup = `
     <div class="scenemap-shell scenemap-settings-shell">
       <section class="scenemap-settings-scroll">
@@ -756,10 +764,6 @@ function renderDrawerSettings() {
           <input type="number" min="0" max="1" step="0.05" data-setting="topP" value="${settings.topP ?? ""}" placeholder="1">
         </label>
       </div>
-      <label>
-        <span>Include last messages</span>
-        <div class="scenemap-native-select" data-native-setting="includeLastXMessages"></div>
-      </label>
         </div>
         <div class="scenemap-settings-group">
           <h3>Interface</h3>
@@ -808,12 +812,24 @@ function renderDrawerSettings() {
             </label>
             <div class="scenemap-inline-error scenemap-preset-schema-error" role="alert" data-preset-schema-error ${presetDraft.schemaError ? "" : "hidden"}>${escapeHtml(presetDraft.schemaError ?? "")}</div>
             <label>
-              <span>Prompt</span>
+              <span>System prompt</span>
               <div class="scenemap-expandable-textarea">
-                <textarea data-preset-editor="prompt" aria-label="Prompt for ${escapeAttr(activePreset.name)}" placeholder="Write the SceneMap generation prompt. Macros like {{schema}} are supported.">${escapeHtml(presetDraft.promptText)}</textarea>
-                ${expandEditorButton("prompt")}
+                <textarea data-preset-editor="systemPrompt" aria-label="System prompt for ${escapeAttr(activePreset.name)}" placeholder="System instructions and reference context.">${escapeHtml(presetDraft.systemPromptText)}</textarea>
+                ${expandEditorButton("systemPrompt")}
               </div>
             </label>
+            <label>
+              <span>User prompt</span>
+              <div class="scenemap-expandable-textarea">
+                <textarea data-preset-editor="userPrompt" aria-label="User prompt for ${escapeAttr(activePreset.name)}" placeholder="Chat history and tracker instructions.">${escapeHtml(presetDraft.userPromptText)}</textarea>
+                ${expandEditorButton("userPrompt")}
+              </div>
+            </label>
+            <details class="scenemap-macro-reference">
+              <summary>SceneMap macros</summary>
+              <p>Lumiverse macros such as <code>{{char}}</code> and <code>{{user}}</code> also work.</p>
+              <ul>${promptMacroReference}</ul>
+            </details>
             <div class="scenemap-preset-layout-row">
               <button class="scenemap-pill-action" data-action="edit-layout">Layout</button>
               <button class="scenemap-pill-action scenemap-primary" data-action="save-preset" data-save-preset ${settingsDraft.saving || !settingsDraft.dirty ? "disabled" : ""}>${settingsDraft.saving ? "Saving..." : "Save preset"}</button>
@@ -836,7 +852,7 @@ function renderDrawerSettings() {
 function mountSettingsSelects(settings: SceneMapSettings) {
   if (!ctxRef || !rootRef) return;
   const mount = (
-    key: "connectionId" | "includeLastXMessages" | "schemaPreset" | "trackerPlacement",
+    key: "connectionId" | "schemaPreset" | "trackerPlacement",
     options: SpindleSelectOption[],
     value: string,
     extra: Partial<Parameters<SpindleFrontendContext["components"]["mountSelect"]>[1]> = {},
@@ -852,9 +868,7 @@ function mountSettingsSelects(settings: SceneMapSettings) {
         ? "Connection"
         : key === "schemaPreset"
           ? "Global preset"
-          : key === "trackerPlacement"
-            ? "Tracker location"
-            : "Include last messages",
+          : "Tracker location",
       onChange: (nextValue) => updateNativeSetting(key, nextValue),
       ...extra,
     }));
@@ -874,15 +888,6 @@ function mountSettingsSelects(settings: SceneMapSettings) {
       clearLabel: "Default active connection",
       searchPlaceholder: "Search connections...",
     },
-  );
-  mount(
-    "includeLastXMessages",
-    [
-      { value: "0", label: "All messages up to target" },
-      ...Array.from({ length: 20 }, (_, index) => ({ value: String(index + 1), label: `Last ${index + 1}` })),
-    ],
-    String(settings.includeLastXMessages),
-    { searchThreshold: Number.MAX_SAFE_INTEGER },
   );
   mount(
     "trackerPlacement",
@@ -915,12 +920,11 @@ function presetSelectOptions(settings: SceneMapSettings): SpindleSelectOption[] 
 }
 
 function updateNativeSetting(
-  key: "connectionId" | "includeLastXMessages" | "schemaPreset" | "trackerPlacement",
+  key: "connectionId" | "schemaPreset" | "trackerPlacement",
   value: string,
 ) {
   const settings = mergeSettings(state.settings);
-  if (key === "includeLastXMessages") settings.includeLastXMessages = Math.max(0, Math.floor(Number(value) || 0));
-  else if (key === "trackerPlacement") settings.trackerPlacement = value === "drawer" ? "drawer" : "dock";
+  if (key === "trackerPlacement") settings.trackerPlacement = value === "drawer" ? "drawer" : "dock";
   else settings[key] = value;
   if (key === "schemaPreset") {
     updateSettingsDraft(settings);
@@ -1038,7 +1042,9 @@ function handleClick(event: Event) {
   if (action === "expand-preset-editor") {
     event.preventDefault();
     const editor = button.dataset.editor;
-    if (editor === "schema" || editor === "prompt") openPresetExpandedEditor(editor);
+    if (editor === "schema" || editor === "systemPrompt" || editor === "userPrompt") {
+      openPresetExpandedEditor(editor);
+    }
   }
   if (action === "generate") {
     const command = getGenerationButtonCommand(state.generationActive, isGenerationRequestPending);
@@ -1473,7 +1479,8 @@ function getPresetEditorDraft(settings: SceneMapSettings, key: string): PresetEd
   const preset = settings.schemaPresets[key] ?? settings.schemaPresets.default;
   const draft: PresetEditorDraft = {
     schemaText: JSON.stringify(preset.value, null, 2),
-    promptText: getPresetPrompt(settings, key),
+    systemPromptText: getPresetSystemPrompt(settings, key),
+    userPromptText: getPresetUserPrompt(settings, key),
     schemaError: null,
   };
   presetEditorDrafts.set(key, draft);
@@ -1497,20 +1504,27 @@ function parseSchemaEditorText(text: string): Record<string, unknown> {
 
 function updatePresetEditorControl(target: HTMLInputElement | HTMLTextAreaElement) {
   const editor = target.dataset.presetEditor;
-  if (editor !== "schema" && editor !== "prompt") return;
+  if (editor !== "schema" && editor !== "systemPrompt" && editor !== "userPrompt") return;
   updatePresetEditorValue(editor, target.value);
 }
 
-function updatePresetEditorValue(editor: "schema" | "prompt", value: string) {
+function updatePresetEditorValue(editor: PresetTextEditor, value: string) {
   const settings = mergeSettings(state.settings);
   const key = settings.schemaPreset;
   const preset = settings.schemaPresets[key] ?? settings.schemaPresets.default;
   const draft = getPresetEditorDraft(settings, key);
-  if (editor === "prompt") {
-    draft.promptText = value;
-    const nextPrompt = value || DEFAULT_PROMPT_JSON;
-    if (nextPrompt !== getPresetPrompt(settings, key)) {
-      settings.schemaPresets[key] = { ...preset, promptJson: nextPrompt };
+  if (editor === "systemPrompt" || editor === "userPrompt") {
+    const isSystem = editor === "systemPrompt";
+    const nextPrompt = value;
+    if (isSystem) draft.systemPromptText = value;
+    else draft.userPromptText = value;
+    const currentPrompt = isSystem
+      ? getPresetSystemPrompt(settings, key)
+      : getPresetUserPrompt(settings, key);
+    if (nextPrompt !== currentPrompt) {
+      settings.schemaPresets[key] = isSystem
+        ? { ...preset, systemPrompt: nextPrompt }
+        : { ...preset, userPrompt: nextPrompt };
       updateSettingsDraft(settings);
     } else {
       refreshSettingsDraftFingerprint(settings);
@@ -1534,7 +1548,8 @@ function updatePresetEditorValue(editor: "schema" | "prompt", value: string) {
   }
 }
 
-function expandEditorButton(editor: "schema" | "prompt"): string {
+function expandEditorButton(editor: PresetTextEditor): string {
+  const label = editor === "schema" ? "Schema JSON" : editor === "systemPrompt" ? "System prompt" : "User prompt";
   return `
     <button
       type="button"
@@ -1542,7 +1557,7 @@ function expandEditorButton(editor: "schema" | "prompt"): string {
       data-action="expand-preset-editor"
       data-editor="${editor}"
       title="Expand editor"
-      aria-label="Expand ${editor === "schema" ? "Schema JSON" : "Prompt"} editor"
+      aria-label="Expand ${label} editor"
     >
       <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M15 3h6v6"/><path d="m21 3-7 7"/><path d="m3 21 7-7"/><path d="M9 21H3v-6"/>
@@ -1551,11 +1566,15 @@ function expandEditorButton(editor: "schema" | "prompt"): string {
   `;
 }
 
-function openPresetExpandedEditor(editor: "schema" | "prompt") {
+function openPresetExpandedEditor(editor: PresetTextEditor) {
   const settings = mergeSettings(state.settings);
   const draft = getPresetEditorDraft(settings, settings.schemaPreset);
-  const title = editor === "schema" ? "SceneMap Schema JSON" : "SceneMap Prompt";
-  const value = editor === "schema" ? draft.schemaText : draft.promptText;
+  const title = editor === "schema"
+    ? "SceneMap Schema JSON"
+    : editor === "systemPrompt" ? "SceneMap System Prompt" : "SceneMap User Prompt";
+  const value = editor === "schema"
+    ? draft.schemaText
+    : editor === "systemPrompt" ? draft.systemPromptText : draft.userPromptText;
   openTextEditor(title, value, (nextValue) => {
     updatePresetEditorValue(editor, nextValue);
     renderDrawerSettings();
@@ -1580,7 +1599,8 @@ function applyPresetEditorDraft(settings: SceneMapSettings, key: string): void {
     settings.schemaPresets[key] = {
       ...preset,
       value: schema,
-      promptJson: draft.promptText || DEFAULT_PROMPT_JSON,
+      systemPrompt: draft.systemPromptText,
+      userPrompt: draft.userPromptText,
     };
   } catch (error) {
     draft.schemaError = (error as Error).message;
@@ -1712,7 +1732,6 @@ function isAutomaticallySavedSetting(key: string | undefined): key is Automatica
     || key === "maxResponseTokens"
     || key === "temperature"
     || key === "topP"
-    || key === "includeLastXMessages"
     || key === "showInputBarButton"
     || key === "showTopToolbarButton"
     || key === "trackerPlacement";
@@ -1752,8 +1771,6 @@ function updateSettingFromControl(
       : Math.max(1, Math.floor(Number(value) || 1));
     settings.maxResponseTokens = normalized;
     if (value === "" || Number(value) !== normalized) target.value = String(normalized);
-  } else if (key === "includeLastXMessages") {
-    settings.includeLastXMessages = Math.max(0, Math.floor(Number(target.value) || 0));
   } else {
     (settings as any)[key] = target.value;
   }
@@ -1780,7 +1797,8 @@ function createPreset() {
     settings.schemaPresets[key] = {
       name,
       value: JSON.parse(JSON.stringify(activePreset.value)) as Record<string, unknown>,
-      promptJson: getPresetPrompt(settings),
+      systemPrompt: getPresetSystemPrompt(settings),
+      userPrompt: getPresetUserPrompt(settings),
       displayLayout: cloneLayout(getPresetLayout(settings)),
     };
     updateSettingsDraft({ ...settings, schemaPreset: key });
@@ -1826,10 +1844,11 @@ function exportPreset() {
   const preset = settings.schemaPresets[settings.schemaPreset] ?? settings.schemaPresets.default;
   const data = {
     type: "scenemap-preset",
-    version: 1,
+    version: 2,
     name: preset.name,
     schema: preset.value,
-    prompt: getPresetPrompt(settings),
+    systemPrompt: getPresetSystemPrompt(settings),
+    userPrompt: getPresetUserPrompt(settings),
     layout: getPresetLayout(settings),
   };
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
@@ -1863,7 +1882,8 @@ async function importPreset() {
       settings.schemaPresets[key] = {
         name,
         value: imported.schema,
-        promptJson: imported.prompt,
+        systemPrompt: imported.systemPrompt,
+        userPrompt: imported.userPrompt,
         displayLayout: imported.layout,
       };
       settings.schemaPreset = key;
@@ -1875,19 +1895,34 @@ async function importPreset() {
   }
 }
 
-function parsePresetImport(value: unknown, filename: string): { name: string; schema: Record<string, unknown>; prompt: string; layout: TrackerBoardDisplayLayout } {
+function parsePresetImport(value: unknown, filename: string): {
+  name: string;
+  schema: Record<string, unknown>;
+  systemPrompt: string;
+  userPrompt: string;
+  layout: TrackerBoardDisplayLayout;
+} {
   const record = getRecord(value);
   if (record.type !== "scenemap-preset") throw new Error("This is not a SceneMap preset file.");
   const schema = getRecord(record.schema);
   if (Object.keys(schema).length === 0) throw new Error("Preset file is missing a schema object.");
   validateSchemaDefinition(schema);
-  if (typeof record.prompt !== "string") throw new Error("Preset file is missing a prompt string.");
+  const isVersionTwo = Number(record.version) >= 2;
+  if (isVersionTwo && (typeof record.systemPrompt !== "string" || typeof record.userPrompt !== "string")) {
+    throw new Error("Preset file is missing its System or User prompt.");
+  }
+  if (!isVersionTwo && typeof record.prompt !== "string") {
+    throw new Error("Preset file is missing a prompt string.");
+  }
   const layout = normalizeImportedLayout(record.layout);
   validateLayout(layout, extractSchemaFieldOptions(schema));
   return {
     name: typeof record.name === "string" && record.name.trim() ? record.name.trim() : filename.replace(/\.json$/i, "").replace(/\.scenemap-preset$/i, ""),
     schema,
-    prompt: record.prompt,
+    systemPrompt: isVersionTwo ? record.systemPrompt as string : DEFAULT_SYSTEM_PROMPT,
+    userPrompt: isVersionTwo
+      ? record.userPrompt as string
+      : migrateLegacyUserPrompt(record.prompt as string, 0),
     layout,
   };
 }
@@ -3580,9 +3615,15 @@ const styles = `
   .scenemap-lv .scenemap-expand-editor-btn { opacity: 1; }
 }
 .scenemap-preset-editor textarea { width: 100%; min-height: 180px; box-sizing: border-box; resize: vertical; border: 1px solid var(--lumiverse-border); border-radius: var(--lumiverse-radius, 8px); background: var(--lumiverse-secondary, rgba(128, 128, 128, .15)); color: var(--lumiverse-text); padding: 10px 11px; font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
-.scenemap-preset-editor textarea[data-preset-editor="prompt"] { min-height: 150px; font-family: inherit; }
+.scenemap-preset-editor textarea[data-preset-editor="systemPrompt"], .scenemap-preset-editor textarea[data-preset-editor="userPrompt"] { min-height: 150px; font-family: inherit; }
 .scenemap-preset-editor textarea:focus { outline: none; border-color: var(--lumiverse-primary, var(--lumiverse-accent)); box-shadow: 0 0 0 1px var(--lumiverse-primary-020, transparent); }
 .scenemap-preset-schema-error { margin-top: -4px; }
+.scenemap-macro-reference { border: 1px solid var(--lumiverse-border); border-radius: var(--lumiverse-radius, 8px); background: var(--lumiverse-secondary, rgba(128, 128, 128, .15)); padding: 8px 10px; color: var(--lumiverse-text-muted); font-size: 11px; }
+.scenemap-macro-reference summary { color: var(--lumiverse-text); cursor: pointer; font-weight: 650; }
+.scenemap-macro-reference p { margin: 9px 0; line-height: 1.45; }
+.scenemap-macro-reference ul { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; }
+.scenemap-macro-reference li { display: grid; grid-template-columns: minmax(185px, auto) 1fr; gap: 8px; align-items: baseline; }
+.scenemap-macro-reference code { color: var(--lumiverse-primary-text, var(--lumiverse-primary)); overflow-wrap: anywhere; }
 .scenemap-preset-layout-row { display: flex; justify-content: flex-end; gap: 8px; }
 .scenemap-preset-layout-row .scenemap-primary { min-width: 112px; }
 .scenemap-settings-shell input:not([type="checkbox"]), .scenemap-editor textarea, .scenemap-layout-editor input, .scenemap-name-editor input {
@@ -3671,6 +3712,7 @@ body.scenemap-layout-is-dragging, body.scenemap-layout-is-dragging * { cursor: g
 .scenemap-runtime-error, .scenemap-inline-error { border: 1px solid rgba(255, 100, 100, 0.45); color: #ffb8b8; background: rgba(120, 0, 0, 0.18); border-radius: var(--lumiverse-radius, 8px); padding: 10px; font-size: 12px; }
 .scenemap-sr-only { position: absolute !important; width: 1px !important; height: 1px !important; padding: 0 !important; margin: -1px !important; overflow: hidden !important; clip: rect(0, 0, 0, 0) !important; white-space: nowrap !important; border: 0 !important; }
 @media (max-width: 760px) {
+  .scenemap-macro-reference li { grid-template-columns: minmax(0, 1fr); gap: 2px; }
   .scenemap-layout-section-header { grid-template-columns: minmax(0, 1fr) auto; align-items: end; }
   .scenemap-layout-section-header .scenemap-layout-actions { grid-column: 2; flex-wrap: nowrap; }
   .scenemap-layout-section-header .scenemap-layout-icon-btn, .scenemap-layout-section-header .scenemap-layout-drag-handle { width: 44px; height: 44px; min-width: 44px; }

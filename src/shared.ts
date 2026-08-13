@@ -1,3 +1,5 @@
+import { chatHistoryMacro } from "./prompt-templates";
+
 export const EXTENSION_KEY = "SceneMap";
 export const SETTINGS_PATH = "settings.json";
 export const CHAT_METADATA_KEY = "scenemap";
@@ -25,6 +27,9 @@ export interface TrackerBoardDisplayLayout {
 export interface SceneMapPreset {
   name: string;
   value: Record<string, unknown>;
+  systemPrompt?: string;
+  userPrompt?: string;
+  /** Legacy single-prompt field retained only so old settings can be migrated. */
   promptJson?: string;
   displayLayout?: TrackerBoardDisplayLayout;
 }
@@ -205,16 +210,25 @@ CRITICAL INSTRUCTIONS:
 
 JSON SCHEMA TO FOLLOW:
 \`\`\`json
-{{schema}}
+{{scenemap_response_schema}}
 \`\`\`
 
 PREVIOUS TRACKER TO UPDATE:
 If this object is not empty, use it as the baseline and update it instead of starting from scratch. Preserve unchanged fields unless recent chat messages clearly changed them.
 \`\`\`json
-{{previous_tracker}}
+{{scenemap_previous_tracker}}
 \`\`\`
 
-{{example_section}}`;
+{{scenemap_example_section}}`;
+
+export const DEFAULT_SYSTEM_PROMPT = "{{scenemap_context}}";
+
+export const DEFAULT_USER_PROMPT = `{{scenemap_chat_history}}
+
+>>> Instructions <<<
+${DEFAULT_PROMPT_JSON}
+
+{{scenemap_partial_task}}`;
 
 export const defaultSettings: SceneMapSettings = {
   version: "1.0.1",
@@ -233,6 +247,8 @@ export const defaultSettings: SceneMapSettings = {
     default: {
       name: "Default",
       value: DEFAULT_SCHEMA_VALUE,
+      systemPrompt: DEFAULT_SYSTEM_PROMPT,
+      userPrompt: DEFAULT_USER_PROMPT,
     },
   },
   includeLastXMessages: 0,
@@ -253,10 +269,26 @@ export function mergeSettings(value: Partial<SceneMapSettings> | null | undefine
   // This removed setting may still exist in older userStorage files. Do not let
   // object spreading accidentally reintroduce the message-level button.
   delete currentValue.showMessageButtons;
-  const schemaPresets = {
+  const mergedPresets = {
     ...base.schemaPresets,
     ...(currentValue.schemaPresets ?? {}),
   };
+  const legacyPrompt = typeof currentValue.promptJson === "string"
+    ? currentValue.promptJson
+    : base.promptJson;
+  const legacyHistoryLimit = typeof currentValue.includeLastXMessages === "number" && Number.isFinite(currentValue.includeLastXMessages)
+    ? Math.max(0, Math.floor(currentValue.includeLastXMessages))
+    : base.includeLastXMessages;
+  const schemaPresets = Object.fromEntries(Object.entries(mergedPresets).map(([key, preset]) => {
+    const presetLegacyPrompt = typeof preset.promptJson === "string" ? preset.promptJson : legacyPrompt;
+    return [key, {
+      ...preset,
+      systemPrompt: typeof preset.systemPrompt === "string" ? preset.systemPrompt : DEFAULT_SYSTEM_PROMPT,
+      userPrompt: typeof preset.userPrompt === "string"
+        ? preset.userPrompt
+        : migrateLegacyUserPrompt(presetLegacyPrompt, legacyHistoryLimit),
+    }];
+  }));
   return {
     ...base,
     ...currentValue,
@@ -331,6 +363,21 @@ export function mergePresetSettings(currentValue: SceneMapSettings, incomingValu
 export function getPresetPrompt(settings: SceneMapSettings, presetKey = settings.schemaPreset): string {
   const preset = settings.schemaPresets[presetKey] ?? settings.schemaPresets[settings.schemaPreset] ?? settings.schemaPresets.default;
   return typeof preset?.promptJson === "string" ? preset.promptJson : settings.promptJson;
+}
+
+export function getPresetSystemPrompt(settings: SceneMapSettings, presetKey = settings.schemaPreset): string {
+  const preset = settings.schemaPresets[presetKey] ?? settings.schemaPresets[settings.schemaPreset] ?? settings.schemaPresets.default;
+  return typeof preset?.systemPrompt === "string" ? preset.systemPrompt : DEFAULT_SYSTEM_PROMPT;
+}
+
+export function getPresetUserPrompt(settings: SceneMapSettings, presetKey = settings.schemaPreset): string {
+  const preset = settings.schemaPresets[presetKey] ?? settings.schemaPresets[settings.schemaPreset] ?? settings.schemaPresets.default;
+  if (typeof preset?.userPrompt === "string") return preset.userPrompt;
+  return migrateLegacyUserPrompt(getPresetPrompt(settings, presetKey), settings.includeLastXMessages);
+}
+
+export function migrateLegacyUserPrompt(prompt: string, includeLastXMessages: number): string {
+  return `${chatHistoryMacro(includeLastXMessages)}\n\n>>> Instructions <<<\n${prompt}\n\n{{scenemap_partial_task}}`;
 }
 
 export function getPresetLayout(settings: SceneMapSettings, presetKey = settings.schemaPreset): TrackerBoardDisplayLayout {

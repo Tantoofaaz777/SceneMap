@@ -1,4 +1,80 @@
 // @bun
+// src/prompt-templates.ts
+var SCENEMAP_PROMPT_MACROS = [
+  { token: "{{scenemap_context}}", description: "Character, persona, scenario and active World Info, with separators." },
+  { token: "{{scenemap_character}}", description: "Character description and personality." },
+  { token: "{{scenemap_persona}}", description: "Active persona description." },
+  { token: "{{scenemap_scenario}}", description: "Character scenario." },
+  { token: "{{scenemap_world_info}}", description: "Active World Book entries." },
+  { token: "{{scenemap_chat_history::N}}", description: "Last N messages in chronological order, separated by a blank line. Omit ::N for all." },
+  { token: "{{scenemap_schema}}", description: "Configured tracker schema." },
+  { token: "{{scenemap_response_schema}}", description: "Schema expected for this operation, including partial regeneration." },
+  { token: "{{scenemap_previous_tracker}}", description: "Tracker used as the continuity baseline." },
+  { token: "{{scenemap_example_response}}", description: "Automatically generated schema example." },
+  { token: "{{scenemap_example_section}}", description: "Complete example section, or empty when no valid example is available." },
+  { token: "{{scenemap_mode}}", description: 'Current operation: "full" or "partial".' },
+  { token: "{{scenemap_selected_fields}}", description: "Fields selected for partial regeneration, otherwise empty." },
+  { token: "{{scenemap_partial_task}}", description: "Partial-regeneration contract, otherwise empty." }
+];
+var legacyAliases = {
+  schema: "schema",
+  previous_tracker: "previousTracker",
+  example_response: "exampleResponse",
+  example_section: "exampleSection"
+};
+var valueKeys = {
+  scenemap_schema: "schema",
+  scenemap_response_schema: "responseSchema",
+  scenemap_previous_tracker: "previousTracker",
+  scenemap_example_response: "exampleResponse",
+  scenemap_example_section: "exampleSection",
+  scenemap_character: "character",
+  scenemap_persona: "persona",
+  scenemap_scenario: "scenario",
+  scenemap_world_info: "worldInfo",
+  scenemap_context: "context",
+  scenemap_mode: "mode",
+  scenemap_selected_fields: "selectedFields",
+  scenemap_partial_task: "partialTask"
+};
+var ownedMacroPattern = /\{\{\s*([a-z_]+)(?:\s*::\s*([^{}]*?))?\s*\}\}/gi;
+function renderSceneMapPromptTemplate(template, values) {
+  return template.replace(ownedMacroPattern, (match, rawName, rawArgument) => {
+    const name = rawName.toLowerCase();
+    if (name === "scenemap_chat_history") {
+      return formatSceneMapChatHistory(values.chatHistory, parseChatHistoryLimit(rawArgument));
+    }
+    const key = valueKeys[name] ?? legacyAliases[name];
+    if (!key)
+      return match;
+    const value = values[key];
+    return typeof value === "string" ? value : match;
+  });
+}
+function parseChatHistoryLimit(argument) {
+  if (argument === undefined || argument.trim() === "")
+    return null;
+  const trimmed = argument.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    throw new Error("{{scenemap_chat_history::N}} expects a positive whole number.");
+  }
+  const limit = Number(trimmed);
+  if (!Number.isSafeInteger(limit) || limit < 1) {
+    throw new Error("{{scenemap_chat_history::N}} expects N to be at least 1.");
+  }
+  return limit;
+}
+function formatSceneMapChatHistory(messages, limit) {
+  const selected = limit === null ? messages : messages.slice(-limit);
+  return selected.map((message) => message.replace(/\r\n/g, `
+`).trim()).filter(Boolean).join(`
+
+`);
+}
+function chatHistoryMacro(limit) {
+  return limit > 0 ? `{{scenemap_chat_history::${Math.floor(limit)}}}` : "{{scenemap_chat_history}}";
+}
+
 // src/shared.ts
 var SETTINGS_PATH = "settings.json";
 var CHAT_METADATA_KEY = "scenemap";
@@ -134,16 +210,23 @@ CRITICAL INSTRUCTIONS:
 
 JSON SCHEMA TO FOLLOW:
 \`\`\`json
-{{schema}}
+{{scenemap_response_schema}}
 \`\`\`
 
 PREVIOUS TRACKER TO UPDATE:
 If this object is not empty, use it as the baseline and update it instead of starting from scratch. Preserve unchanged fields unless recent chat messages clearly changed them.
 \`\`\`json
-{{previous_tracker}}
+{{scenemap_previous_tracker}}
 \`\`\`
 
-{{example_section}}`;
+{{scenemap_example_section}}`;
+var DEFAULT_SYSTEM_PROMPT = "{{scenemap_context}}";
+var DEFAULT_USER_PROMPT = `{{scenemap_chat_history}}
+
+>>> Instructions <<<
+${DEFAULT_PROMPT_JSON}
+
+{{scenemap_partial_task}}`;
 var defaultSettings = {
   version: "1.0.1",
   formatVersion: "F_1.0",
@@ -160,7 +243,9 @@ var defaultSettings = {
   schemaPresets: {
     default: {
       name: "Default",
-      value: DEFAULT_SCHEMA_VALUE
+      value: DEFAULT_SCHEMA_VALUE,
+      systemPrompt: DEFAULT_SYSTEM_PROMPT,
+      userPrompt: DEFAULT_USER_PROMPT
     }
   },
   includeLastXMessages: 0,
@@ -176,10 +261,20 @@ function mergeSettings(value) {
     return base;
   const currentValue = { ...value };
   delete currentValue.showMessageButtons;
-  const schemaPresets = {
+  const mergedPresets = {
     ...base.schemaPresets,
     ...currentValue.schemaPresets ?? {}
   };
+  const legacyPrompt = typeof currentValue.promptJson === "string" ? currentValue.promptJson : base.promptJson;
+  const legacyHistoryLimit = typeof currentValue.includeLastXMessages === "number" && Number.isFinite(currentValue.includeLastXMessages) ? Math.max(0, Math.floor(currentValue.includeLastXMessages)) : base.includeLastXMessages;
+  const schemaPresets = Object.fromEntries(Object.entries(mergedPresets).map(([key, preset]) => {
+    const presetLegacyPrompt = typeof preset.promptJson === "string" ? preset.promptJson : legacyPrompt;
+    return [key, {
+      ...preset,
+      systemPrompt: typeof preset.systemPrompt === "string" ? preset.systemPrompt : DEFAULT_SYSTEM_PROMPT,
+      userPrompt: typeof preset.userPrompt === "string" ? preset.userPrompt : migrateLegacyUserPrompt(presetLegacyPrompt, legacyHistoryLimit)
+    }];
+  }));
   return {
     ...base,
     ...currentValue,
@@ -240,6 +335,24 @@ function mergePresetSettings(currentValue, incomingValue) {
 function getPresetPrompt(settings, presetKey = settings.schemaPreset) {
   const preset = settings.schemaPresets[presetKey] ?? settings.schemaPresets[settings.schemaPreset] ?? settings.schemaPresets.default;
   return typeof preset?.promptJson === "string" ? preset.promptJson : settings.promptJson;
+}
+function getPresetSystemPrompt(settings, presetKey = settings.schemaPreset) {
+  const preset = settings.schemaPresets[presetKey] ?? settings.schemaPresets[settings.schemaPreset] ?? settings.schemaPresets.default;
+  return typeof preset?.systemPrompt === "string" ? preset.systemPrompt : DEFAULT_SYSTEM_PROMPT;
+}
+function getPresetUserPrompt(settings, presetKey = settings.schemaPreset) {
+  const preset = settings.schemaPresets[presetKey] ?? settings.schemaPresets[settings.schemaPreset] ?? settings.schemaPresets.default;
+  if (typeof preset?.userPrompt === "string")
+    return preset.userPrompt;
+  return migrateLegacyUserPrompt(getPresetPrompt(settings, presetKey), settings.includeLastXMessages);
+}
+function migrateLegacyUserPrompt(prompt, includeLastXMessages) {
+  return `${chatHistoryMacro(includeLastXMessages)}
+
+>>> Instructions <<<
+${prompt}
+
+{{scenemap_partial_task}}`;
 }
 function getPresetLayout(settings, presetKey = settings.schemaPreset) {
   const preset = settings.schemaPresets[presetKey] ?? settings.schemaPresets[settings.schemaPreset] ?? settings.schemaPresets.default;
@@ -391,9 +504,6 @@ function parseModelJson(content) {
   } catch (error) {
     throw new Error(`Model response is not valid JSON: ${error.message}`);
   }
-}
-function renderPrompt(template, values) {
-  return template.replace(/\{\{\s*(schema|previous_tracker|example_response|example_section)\s*\}\}/g, (_match, key) => values[key] ?? "");
 }
 function humanizeTrackerKey(key) {
   return key.replace(/[_-]+/g, " ").replace(/([a-z])([A-Z])/g, "$1 $2").replace(/\s+/g, " ").trim().replace(/\w\S*/g, (word) => word.charAt(0).toUpperCase() + word.slice(1));
@@ -2468,20 +2578,10 @@ function getAutoGenerateMessagesRemaining(settings, messages, latest, activeMess
   const messagesDue = latest ? countAssistantMessagesAfter(messages, latest.messageId) : countAssistantMessagesBetween(messages, null, activeMessage.id);
   return Math.max(0, interval - messagesDue);
 }
-function trimMessagesForPrompt(messages, targetId, includeLastXMessages) {
+function getPromptChatHistory(messages, targetId) {
   const targetIndex = messages.findIndex((message) => message.id === targetId);
   const end = targetIndex === -1 ? messages.length : targetIndex + 1;
-  const start = includeLastXMessages > 0 ? Math.max(0, end - includeLastXMessages) : 0;
-  return messages.slice(start, end).map((message) => ({
-    role: message.role,
-    content: message.content
-  }));
-}
-async function resolvePromptMessages(messages, context) {
-  return Promise.all(messages.map(async (message) => ({
-    ...message,
-    content: await resolveDisplayText(message.content, context)
-  })));
+  return messages.slice(0, end).map((message) => message.content);
 }
 async function listConnections(userId) {
   try {
@@ -2517,59 +2617,61 @@ async function resolveTrackerDisplayData(value, context) {
   ]));
   return Object.fromEntries(entries);
 }
-async function buildReferencePromptMessages(chat, userId, characterId, targetMessageId) {
-  const context = {
-    chatId: chat.id,
-    characterId,
-    userId
-  };
-  const [characterContext, personaReference, activeWorldInfo] = await Promise.all([
+async function buildPromptReferenceValues(chat, userId, characterId, targetMessageId) {
+  const [characterContext, persona, activeWorldInfo] = await Promise.all([
     buildCharacterContext(chat, userId, characterId),
-    buildPersonaReference(chat, userId, characterId),
+    buildPersonaContext(chat, userId, characterId),
     buildActiveWorldInfo(chat.id, userId, targetMessageId)
   ]);
+  const characterReference = separatedReferenceBlock("{{char}}", [characterContext.character]);
+  const personaReference = separatedReferenceBlock("{{user}}", [persona]);
   const worldInfoReference = separatedReferenceBlock("World Info", [
     characterContext.scenario,
     ...activeWorldInfo
   ]);
-  const sections = [characterContext.reference, personaReference, worldInfoReference].filter(Boolean);
-  return Promise.all(sections.map(async (content) => ({
-    role: "system",
-    content: await resolveDisplayText(content, context)
-  })));
+  return {
+    character: characterContext.character,
+    persona,
+    scenario: characterContext.scenario,
+    worldInfo: activeWorldInfo.join(`
+
+`),
+    context: [characterReference, personaReference, worldInfoReference].filter(Boolean).join(`
+
+`)
+  };
 }
 async function buildCharacterContext(chat, userId, characterId) {
   if (!characterId)
-    return { reference: null, scenario: "" };
+    return { character: "", scenario: "" };
   try {
     const character = await spindle.characters.get(characterId, userId);
     if (!character)
-      return { reference: null, scenario: "" };
+      return { character: "", scenario: "" };
     const effectiveCharacter = resolveCharacterAlternateFields(character, chat);
     return {
-      reference: separatedReferenceBlock("{{char}}", [
+      character: [
         compactText(effectiveCharacter.description),
         compactText(effectiveCharacter.personality)
-      ]),
+      ].filter(Boolean).join(`
+
+`),
       scenario: compactText(effectiveCharacter.scenario)
     };
   } catch (error) {
     spindle.log.warn(`SceneMap could not read character card context: ${error.message}`);
-    return { reference: null, scenario: "" };
+    return { character: "", scenario: "" };
   }
 }
-async function buildPersonaReference(chat, userId, characterId) {
+async function buildPersonaContext(chat, userId, characterId) {
   try {
     const persona = await spindle.personas.getActive(userId) ?? await spindle.personas.getDefault(userId);
     if (!persona)
-      return null;
-    const resolvedPersona = await resolvePersonaMacro(chat, userId, persona.description, characterId);
-    return separatedReferenceBlock("{{user}}", [
-      compactText(resolvedPersona)
-    ]);
+      return "";
+    return compactText(await resolvePersonaMacro(chat, userId, persona.description, characterId));
   } catch (error) {
     spindle.log.warn(`SceneMap could not read persona context: ${error.message}`);
-    return null;
+    return "";
   }
 }
 async function buildActiveWorldInfo(chatId, userId, targetMessageId) {
@@ -2641,11 +2743,6 @@ function separatedReferenceBlock(label, parts) {
   return body ? `>>> ${label} <<<
 ${body}` : null;
 }
-function wrapInstructions(text) {
-  const body = compactText(text);
-  return body ? `>>> Instructions <<<
-${body}` : "";
-}
 function getRecord2(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : null;
 }
@@ -2683,6 +2780,23 @@ async function resolveDisplayText(text, context) {
     spindle.log.warn(`SceneMap macro display resolve failed: ${error.message}`);
     return text;
   }
+}
+async function buildGenerationPromptMessages(systemTemplate, userTemplate, values, context) {
+  const templates = [
+    { role: "system", content: systemTemplate },
+    { role: "user", content: userTemplate }
+  ];
+  const messages = [];
+  for (const template of templates) {
+    const expanded = renderSceneMapPromptTemplate(template.content, values);
+    const resolved = compactText(await resolveDisplayText(expanded, context));
+    if (resolved)
+      messages.push({ role: template.role, content: resolved });
+  }
+  if (messages.length === 0) {
+    throw new Error("The active preset has empty System and User prompts.");
+  }
+  return messages;
 }
 async function buildState(userId) {
   const settings = await loadSettings(userId);
@@ -2745,6 +2859,93 @@ function sendGenerationStatus(userId, cancelling = false) {
     cancelling: generation !== null && cancelling
   }, userId);
 }
+async function resolveRegisteredPromptMacro(context) {
+  const name = typeof context.name === "string" ? context.name.toLowerCase() : "";
+  const chatId = context.env?.chat?.id;
+  if (name === "scenemap_character") {
+    return [compactText(context.env?.character?.description), compactText(context.env?.character?.personality)].filter(Boolean).join(`
+
+`);
+  }
+  if (name === "scenemap_persona")
+    return compactText(context.env?.character?.persona);
+  if (name === "scenemap_scenario")
+    return compactText(context.env?.character?.scenario);
+  if (name === "scenemap_mode")
+    return "full";
+  if (name === "scenemap_selected_fields" || name === "scenemap_partial_task")
+    return "";
+  if (typeof chatId !== "string" || !chatId)
+    return "";
+  try {
+    const messages = await spindle.chat.getMessages(chatId);
+    if (name === "scenemap_chat_history") {
+      const args = Array.isArray(context.args) ? context.args : [];
+      return formatSceneMapChatHistory(messages.map((message) => message.content), parseChatHistoryLimit(typeof args[0] === "string" ? args[0] : undefined));
+    }
+    if (name === "scenemap_world_info" || name === "scenemap_context") {
+      const character = [compactText(context.env?.character?.description), compactText(context.env?.character?.personality)].filter(Boolean).join(`
+
+`);
+      const persona = compactText(context.env?.character?.persona);
+      const scenario = compactText(context.env?.character?.scenario);
+      const activeWorldInfo = await buildCurrentActiveWorldInfo(chatId);
+      if (name === "scenemap_world_info")
+        return activeWorldInfo.join(`
+
+`);
+      return [
+        separatedReferenceBlock("{{char}}", [character]),
+        separatedReferenceBlock("{{user}}", [persona]),
+        separatedReferenceBlock("World Info", [scenario, ...activeWorldInfo])
+      ].filter(Boolean).join(`
+
+`);
+    }
+    const settings = await loadSettings();
+    const chat = await spindle.chats.get(chatId);
+    const presetKey = getChatPresetKey(chat, settings);
+    const preset = settings.schemaPresets[presetKey] ?? settings.schemaPresets[settings.schemaPreset] ?? settings.schemaPresets.default;
+    const schema = JSON.stringify(preset.value, null, 2);
+    if (name === "scenemap_schema" || name === "scenemap_response_schema")
+      return schema;
+    const example = createValidatedSchemaExample(preset.value);
+    const exampleResponse = example === null ? "" : JSON.stringify(example, null, 2);
+    if (name === "scenemap_example_response")
+      return exampleResponse;
+    if (name === "scenemap_example_section") {
+      return example === null ? "" : `EXAMPLE OF A PERFECT RESPONSE:
+\`\`\`json
+${exampleResponse}
+\`\`\``;
+    }
+    if (name === "scenemap_previous_tracker") {
+      const target = findLatestAssistantMessage(messages);
+      if (!target)
+        return "{}";
+      return getPreviousTrackerJson(messages, target.id, { presetKey, schemaHash: schemaFingerprint(preset.value) }, (message) => getTrackerFromStore(getTrackerStore2(message), getActiveSwipeId(message)));
+    }
+    return "";
+  } catch (error) {
+    spindle.log.warn(`SceneMap prompt macro ${name || "unknown"} failed: ${error.message}`);
+    return "";
+  }
+}
+async function buildCurrentActiveWorldInfo(chatId) {
+  try {
+    const activated = await spindle.world_books.getActivated(chatId);
+    const entries = await Promise.all(activated.map(async (entry) => {
+      try {
+        return compactText((await spindle.world_books.entries.get(entry.id))?.content);
+      } catch {
+        return "";
+      }
+    }));
+    return entries.filter(Boolean);
+  } catch {
+    return [];
+  }
+}
 async function resolveSceneMapMacro(context) {
   const chatId = context.env?.chat?.id;
   if (typeof chatId !== "string" || !chatId)
@@ -2782,7 +2983,7 @@ function getChatPresetKey(chat, settings) {
   return typeof key === "string" && settings.schemaPresets[key] ? key : settings.schemaPreset;
 }
 function removeLegacyExampleSection(template) {
-  return template.replace(/EXAMPLE OF A PERFECT RESPONSE:\s*```json\s*\{\{\s*example_response\s*\}\}\s*```/gi, "");
+  return template.replace(/EXAMPLE OF A PERFECT RESPONSE:\s*```json\s*\{\{\s*(?:scenemap_)?example_response\s*\}\}\s*```/gi, "");
 }
 function buildPartialResponseSchema(trackerSchema, selections) {
   const schema = {
@@ -2802,8 +3003,8 @@ function buildPartialResponseSchema(trackerSchema, selections) {
     schema.$schema = trackerSchema.$schema;
   return schema;
 }
-function buildPartialRegenerationPrompt(tracker, selections, responseSchema, originalInstructions) {
-  const fieldMap = selections.map((selection) => [
+function buildSelectedFieldsPrompt(selections) {
+  return selections.map((selection) => [
     `${selection.id}: ${selection.label}`,
     `Current value: ${JSON.stringify(selection.currentValue, null, 2)}`,
     `Value schema: ${JSON.stringify(selection.schema, null, 2)}`
@@ -2811,10 +3012,9 @@ function buildPartialRegenerationPrompt(tracker, selections, responseSchema, ori
 `)).join(`
 
 `);
+}
+function buildPartialRegenerationTask(tracker, selectedFields, responseSchema) {
   return [
-    "ORIGINAL TRACKER INSTRUCTIONS (semantic guidance only):",
-    originalInstructions,
-    "",
     "PARTIAL TRACKER UPDATE TASK (this output contract takes precedence):",
     "Regenerate only the selected tracker fields using the conversation and reference context.",
     "Keep identities and continuity consistent with the current tracker. Do not invent changes unsupported by the scene.",
@@ -2824,7 +3024,7 @@ function buildPartialRegenerationPrompt(tracker, selections, responseSchema, ori
     JSON.stringify(tracker, null, 2),
     "",
     "SELECTED FIELDS:",
-    fieldMap,
+    selectedFields,
     "",
     "RESPONSE JSON SCHEMA:",
     JSON.stringify(responseSchema, null, 2)
@@ -2892,20 +3092,33 @@ async function regenerateTrackerFields(messageId, swipeId, rawPaths, userId) {
       };
     });
     const responseSchema = buildPartialResponseSchema(preset.value, selections);
-    const schemaExample = createValidatedSchemaExample(preset.value);
-    const originalInstructions = renderPrompt(getPresetPrompt(settings, presetKey), {
-      schema: JSON.stringify(preset.value, null, 2),
-      previous_tracker: JSON.stringify(baseline, null, 2),
-      example_response: schemaExample === null ? "" : JSON.stringify(schemaExample, null, 2),
-      example_section: ""
-    });
-    const partialPrompt = buildPartialRegenerationPrompt(baseline, selections, responseSchema, originalInstructions);
+    const schemaExample = createValidatedSchemaExample(responseSchema);
     const characterId = resolveMessageCharacterId(chat, target);
     const context = { chatId: chat.id, characterId, userId };
-    const promptMessages = await raceWithAbort(resolvePromptMessages(trimMessagesForPrompt(messages, target.id, settings.includeLastXMessages), context), controller.signal);
-    const referenceMessages = await raceWithAbort(buildReferencePromptMessages(chat, userId, characterId, target.id), controller.signal);
-    promptMessages.unshift(...referenceMessages);
-    promptMessages.push({ role: "user", content: wrapInstructions(partialPrompt) });
+    const referenceValues = await raceWithAbort(buildPromptReferenceValues(chat, userId, characterId, target.id), controller.signal);
+    const selectedFields = buildSelectedFieldsPrompt(selections);
+    const schemaText = JSON.stringify(preset.value, null, 2);
+    const responseSchemaText = JSON.stringify(responseSchema, null, 2);
+    const exampleResponse = schemaExample === null ? "" : JSON.stringify(schemaExample, null, 2);
+    const exampleSection = schemaExample === null ? "" : `EXAMPLE OF A PERFECT RESPONSE:
+\`\`\`json
+${exampleResponse}
+\`\`\``;
+    const systemTemplate = getPresetSystemPrompt(settings, presetKey);
+    const rawUserTemplate = getPresetUserPrompt(settings, presetKey);
+    const userTemplate = schemaExample === null ? removeLegacyExampleSection(rawUserTemplate) : rawUserTemplate;
+    const promptMessages = await raceWithAbort(buildGenerationPromptMessages(systemTemplate, userTemplate, {
+      schema: schemaText,
+      responseSchema: responseSchemaText,
+      previousTracker: JSON.stringify(baseline, null, 2),
+      exampleResponse,
+      exampleSection,
+      ...referenceValues,
+      mode: "partial",
+      selectedFields,
+      partialTask: buildPartialRegenerationTask(baseline, selectedFields, responseSchema),
+      chatHistory: getPromptChatHistory(messages, target.id)
+    }, context), controller.signal);
     spindle.toast.info(selections.length === 1 ? "Regenerating selected field..." : `Regenerating ${selections.length} selected fields...`, { title: "SceneMap", userId });
     const result = await raceWithAbort(generateQuiet({
       messages: promptMessages,
@@ -2992,20 +3205,25 @@ async function generateTracker(userId, expectedLatestMessageId) {
 \`\`\`json
 ${exampleResponse}
 \`\`\``;
-    const rawPromptTemplate = getPresetPrompt(settings, presetKey);
-    const promptTemplate = schemaExample === null ? removeLegacyExampleSection(rawPromptTemplate) : rawPromptTemplate;
-    const finalPrompt = renderPrompt(promptTemplate, {
-      schema: JSON.stringify(preset.value, null, 2),
-      previous_tracker: previousTracker,
-      example_response: exampleResponse,
-      example_section: exampleSection
-    });
     const characterId = resolveMessageCharacterId(chat, target);
     const context = { chatId: chat.id, characterId, userId };
-    const promptMessages = await raceWithAbort(resolvePromptMessages(trimMessagesForPrompt(messages, target.id, settings.includeLastXMessages), context), controller.signal);
-    const referenceMessages = await raceWithAbort(buildReferencePromptMessages(chat, userId, characterId, target.id), controller.signal);
-    promptMessages.unshift(...referenceMessages);
-    promptMessages.push({ role: "user", content: wrapInstructions(finalPrompt) });
+    const referenceValues = await raceWithAbort(buildPromptReferenceValues(chat, userId, characterId, target.id), controller.signal);
+    const schemaText = JSON.stringify(preset.value, null, 2);
+    const systemTemplate = getPresetSystemPrompt(settings, presetKey);
+    const rawUserTemplate = getPresetUserPrompt(settings, presetKey);
+    const userTemplate = schemaExample === null ? removeLegacyExampleSection(rawUserTemplate) : rawUserTemplate;
+    const promptMessages = await raceWithAbort(buildGenerationPromptMessages(systemTemplate, userTemplate, {
+      schema: schemaText,
+      responseSchema: schemaText,
+      previousTracker,
+      exampleResponse,
+      exampleSection,
+      ...referenceValues,
+      mode: "full",
+      selectedFields: "",
+      partialTask: "",
+      chatHistory: getPromptChatHistory(messages, target.id)
+    }, context), controller.signal);
     spindle.toast.info("Mapping this scene...", { title: "SceneMap", userId });
     const result = await raceWithAbort(generateQuiet({
       messages: promptMessages,
@@ -3159,6 +3377,20 @@ registerPullMacro({
   handler: resolveSceneMapMacro,
   volatile: true
 });
+for (const macro of SCENEMAP_PROMPT_MACROS) {
+  const name = macro.token.match(/^\{\{([a-z_]+)/i)?.[1];
+  if (!name)
+    continue;
+  registerPullMacro({
+    name,
+    category: "extension:scenemap",
+    description: macro.description,
+    returnType: "string",
+    args: name === "scenemap_chat_history" ? [{ name: "N", description: "Optional number of recent messages.", required: false }] : undefined,
+    handler: resolveRegisteredPromptMacro,
+    volatile: true
+  });
+}
 spindle.onFrontendMessage(async (payload, userId) => {
   try {
     if (!userId)
