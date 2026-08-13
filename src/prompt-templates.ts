@@ -34,6 +34,13 @@ export const SCENEMAP_PROMPT_MACROS = [
   { token: "{{scenemap_partial_task}}", description: "Partial-regeneration contract, otherwise empty." },
 ] as const;
 
+export const LEGACY_SCENEMAP_PROMPT_MACROS = [
+  { token: "{{schema}}", description: "Legacy alias for {{scenemap_schema}}." },
+  { token: "{{previous_tracker}}", description: "Legacy alias for {{scenemap_previous_tracker}}." },
+  { token: "{{example_response}}", description: "Legacy alias for {{scenemap_example_response}}." },
+  { token: "{{example_section}}", description: "Legacy alias for {{scenemap_example_section}}." },
+] as const;
+
 const legacyAliases: Record<string, keyof SceneMapPromptTemplateValues> = {
   schema: "schema",
   previous_tracker: "previousTracker",

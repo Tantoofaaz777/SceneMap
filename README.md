@@ -14,6 +14,7 @@ SceneMap is a Lumiverse Spindle extension that tracks roleplay scene state as st
 - Import and export presets containing schema, split prompts, and layout.
 - Include character card, active persona, and active world info context during tracker generation.
 - Expose the latest tracker as the `{{scenemap}}` macro for prompts.
+- Browse and copy every supported macro from a dedicated reference tab.
 
 ## Prompt templates
 
@@ -21,7 +22,7 @@ Every preset has independently editable System and User messages. SceneMap expan
 
 `{{scenemap_chat_history}}` inserts all chat messages through the generation target as plain chronological text. `{{scenemap_chat_history::N}}` limits it to the last `N` messages. Message contents are separated only by a blank line; no user or assistant labels are added.
 
-The editor lists the remaining context, schema, continuity, example, and partial-regeneration macros alongside their descriptions. Older single-prompt presets are migrated automatically, and version 1 preset exports remain importable.
+The Macros tab lists the roleplay macro, generation-template macros, and legacy aliases with descriptions and one-click copy buttons. Older single-prompt presets are migrated automatically, and version 1 preset exports remain importable.
 
 ## Install
 

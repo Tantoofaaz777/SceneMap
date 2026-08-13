@@ -2213,6 +2213,12 @@ var SCENEMAP_PROMPT_MACROS = [
   { token: "{{scenemap_selected_fields}}", description: "Fields selected for partial regeneration, otherwise empty." },
   { token: "{{scenemap_partial_task}}", description: "Partial-regeneration contract, otherwise empty." }
 ];
+var LEGACY_SCENEMAP_PROMPT_MACROS = [
+  { token: "{{schema}}", description: "Legacy alias for {{scenemap_schema}}." },
+  { token: "{{previous_tracker}}", description: "Legacy alias for {{scenemap_previous_tracker}}." },
+  { token: "{{example_response}}", description: "Legacy alias for {{scenemap_example_response}}." },
+  { token: "{{example_section}}", description: "Legacy alias for {{scenemap_example_section}}." }
+];
 function chatHistoryMacro(limit) {
   return limit > 0 ? `{{scenemap_chat_history::${Math.floor(limit)}}}` : "{{scenemap_chat_history}}";
 }
@@ -4120,6 +4126,8 @@ var GENERATION_REQUEST_TIMEOUT_MS = 1e4;
 var TOP_TOOLBAR_DOUBLE_CLICK_MS = 280;
 var TOP_TOOLBAR_DOUBLE_TOUCH_MS = 440;
 var iconSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l-6 3V6l6-3 6 3 6-3v15l-6 3-6-3z"/><path d="M9 3v15"/><path d="M15 6v15"/></svg>`;
+var copySvg = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M15 9V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3"/></svg>`;
+var checkSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12.5 4.2 4.2L19 7"/></svg>`;
 function setup(ctx) {
   hasReceivedInitialState = false;
   trackerEditSession = null;
@@ -4146,8 +4154,8 @@ function setup(ctx) {
     title: "SceneMap",
     shortName: "Map",
     headerTitle: "SceneMap",
-    description: "View the SceneMap tracker and settings",
-    keywords: ["tracker", "scene", "map", "json", "settings"],
+    description: "View the SceneMap tracker, settings, and macro reference",
+    keywords: ["tracker", "scene", "map", "json", "settings", "macros"],
     iconSvg
   });
   tabHandle = tab;
@@ -4560,43 +4568,94 @@ function renderDrawerContent() {
     renderDrawerPage(trackerPanelMarkup());
     return;
   }
+  if (drawerView === "macros") {
+    destroySelectHandles(drawerSelectHandles);
+    drawerSelectHandles = [];
+    renderDrawerPage(macrosPanelMarkup());
+    return;
+  }
   renderDrawerSettings();
 }
 function renderDrawerPage(content) {
   if (!rootRef)
     return;
   let page = rootRef.firstElementChild;
-  if (!(page instanceof HTMLElement) || !page.classList.contains("scenemap-drawer-scroll")) {
+  const viewSignature = availableDrawerViews().join(",");
+  if (!(page instanceof HTMLElement) || !page.classList.contains("scenemap-drawer-scroll") || page.dataset.scenemapViews !== viewSignature) {
     rootRef.innerHTML = drawerPageMarkup("");
     page = rootRef.firstElementChild;
   }
   if (!(page instanceof HTMLElement))
     return;
-  const trackerActive = drawerView === "tracker";
-  const trackerTab = page.querySelector('[data-action="show-tracker"]');
-  const settingsTab = page.querySelector('[data-action="show-settings"]');
-  trackerTab?.classList.toggle("is-active", trackerActive);
-  trackerTab?.setAttribute("aria-selected", String(trackerActive));
-  trackerTab?.setAttribute("tabindex", trackerActive ? "0" : "-1");
-  settingsTab?.classList.toggle("is-active", !trackerActive);
-  settingsTab?.setAttribute("aria-selected", String(!trackerActive));
-  settingsTab?.setAttribute("tabindex", trackerActive ? "-1" : "0");
+  for (const viewName of availableDrawerViews()) {
+    const active = drawerView === viewName;
+    const tab = page.querySelector(`[data-action="show-${viewName}"]`);
+    tab?.classList.toggle("is-active", active);
+    tab?.setAttribute("aria-selected", String(active));
+    tab?.setAttribute("tabindex", active ? "0" : "-1");
+  }
   const view = page.querySelector(".scenemap-drawer-view");
   if (view) {
-    view.setAttribute("aria-labelledby", trackerActive ? "scenemap-tab-tracker" : "scenemap-tab-settings");
+    view.setAttribute("aria-labelledby", `scenemap-tab-${drawerView}`);
     view.innerHTML = content;
   }
 }
 function drawerPageMarkup(content) {
-  const trackerActive = drawerView === "tracker";
+  const tabs = availableDrawerViews().map((viewName) => {
+    const active = drawerView === viewName;
+    const label = viewName.charAt(0).toUpperCase() + viewName.slice(1);
+    return `<button type="button" id="scenemap-tab-${viewName}" role="tab" data-action="show-${viewName}" aria-controls="scenemap-tabpanel" aria-selected="${active}" tabindex="${active ? "0" : "-1"}" class="${active ? "is-active" : ""}">${label}</button>`;
+  }).join("");
   return `
-    <div class="scenemap-drawer-scroll">
+    <div class="scenemap-drawer-scroll" data-scenemap-views="${availableDrawerViews().join(",")}">
       <nav class="scenemap-view-tabs" role="tablist" aria-label="SceneMap sections">
-        <button type="button" id="scenemap-tab-tracker" role="tab" data-action="show-tracker" aria-controls="scenemap-tabpanel" aria-selected="${trackerActive}" tabindex="${trackerActive ? "0" : "-1"}" class="${trackerActive ? "is-active" : ""}">Tracker</button>
-        <button type="button" id="scenemap-tab-settings" role="tab" data-action="show-settings" aria-controls="scenemap-tabpanel" aria-selected="${!trackerActive}" tabindex="${trackerActive ? "-1" : "0"}" class="${trackerActive ? "" : "is-active"}">Settings</button>
+        ${tabs}
       </nav>
-      <div class="scenemap-drawer-view" id="scenemap-tabpanel" role="tabpanel" aria-labelledby="${trackerActive ? "scenemap-tab-tracker" : "scenemap-tab-settings"}">${content}</div>
+      <div class="scenemap-drawer-view" id="scenemap-tabpanel" role="tabpanel" aria-labelledby="scenemap-tab-${drawerView}">${content}</div>
     </div>
+  `;
+}
+function availableDrawerViews() {
+  return mergeSettings(state.settings).trackerPlacement === "drawer" ? ["tracker", "settings", "macros"] : ["settings", "macros"];
+}
+function macrosPanelMarkup() {
+  const roleplayMacros = [{
+    token: "{{scenemap}}",
+    description: "Latest SceneMap tracker formatted as plain text for the roleplay prompt."
+  }];
+  return `
+    <div class="scenemap-shell scenemap-macros-shell">
+      <section class="scenemap-macros-scroll">
+        <header class="scenemap-reference-header">
+          <span>Reference</span>
+          <h2>Macros</h2>
+        </header>
+        ${macroReferenceSectionMarkup("Roleplay prompt", "Place this in the prompt sent to your roleplay model.", roleplayMacros)}
+        ${macroReferenceSectionMarkup("SceneMap generation prompts", "Use these inside the System and User prompt templates of a SceneMap preset. Native Lumiverse macros such as {{char}} and {{user}} also work there.", SCENEMAP_PROMPT_MACROS)}
+        ${macroReferenceSectionMarkup("Legacy aliases", "Older presets can keep using these aliases, but the namespaced forms above are recommended for new prompts.", LEGACY_SCENEMAP_PROMPT_MACROS)}
+      </section>
+    </div>
+  `;
+}
+function macroReferenceSectionMarkup(title, help, macros) {
+  return `
+    <section class="scenemap-macro-section">
+      <h3>${escapeHtml(title)}</h3>
+      <p>${escapeHtml(help)}</p>
+      <div class="scenemap-macro-list">
+        ${macros.map((macro) => `
+          <article class="scenemap-macro-row">
+            <div class="scenemap-macro-details">
+              <code>${escapeHtml(macro.token)}</code>
+              <span>${escapeHtml(macro.description)}</span>
+            </div>
+            <button type="button" class="scenemap-icon-btn scenemap-macro-copy" data-action="copy-macro" data-copy-macro="${escapeAttr(macro.token)}" title="Copy ${escapeAttr(macro.token)}" aria-label="Copy ${escapeAttr(macro.token)}">
+              ${copySvg}
+            </button>
+          </article>
+        `).join("")}
+      </div>
+    </section>
   `;
 }
 function trackerPanelMarkup() {
@@ -4660,10 +4719,6 @@ function renderDrawerSettings() {
   const canDeletePreset = settings.schemaPreset !== "default" && presetKeys.length > 1;
   const activePreset = settings.schemaPresets[settings.schemaPreset] ?? settings.schemaPresets.default;
   const presetDraft = getPresetEditorDraft(settings, settings.schemaPreset);
-  const drawerTrackerMode = settings.trackerPlacement === "drawer";
-  const promptMacroReference = SCENEMAP_PROMPT_MACROS.map((macro) => `
-    <li><code>${escapeHtml(macro.token)}</code><span>${escapeHtml(macro.description)}</span></li>
-  `).join("");
   const settingsMarkup = `
     <div class="scenemap-shell scenemap-settings-shell">
       <section class="scenemap-settings-scroll">
@@ -4761,11 +4816,6 @@ function renderDrawerSettings() {
                 ${expandEditorButton("userPrompt")}
               </div>
             </label>
-            <details class="scenemap-macro-reference">
-              <summary>SceneMap macros</summary>
-              <p>Lumiverse macros such as <code>{{char}}</code> and <code>{{user}}</code> also work.</p>
-              <ul>${promptMacroReference}</ul>
-            </details>
             <div class="scenemap-preset-layout-row">
               <button class="scenemap-pill-action" data-action="edit-layout">Layout</button>
               <button class="scenemap-pill-action scenemap-primary" data-action="save-preset" data-save-preset ${settingsDraft.saving || !settingsDraft.dirty ? "disabled" : ""}>${settingsDraft.saving ? "Saving..." : "Save preset"}</button>
@@ -4775,10 +4825,7 @@ function renderDrawerSettings() {
       </section>
     </div>
   `;
-  if (drawerTrackerMode)
-    renderDrawerPage(settingsMarkup);
-  else
-    rootRef.innerHTML = settingsMarkup;
+  renderDrawerPage(settingsMarkup);
   mountSettingsSelects(settings);
   restoreScrollPositions(scrollSnapshot);
   drawerScrollRestoreFrame = requestAnimationFrame(() => {
@@ -4949,9 +4996,12 @@ function handleClick(event) {
   if (action === "show-tracker" && mergeSettings(state.settings).trackerPlacement === "drawer") {
     activateDrawerView("tracker");
   }
-  if (action === "show-settings" && mergeSettings(state.settings).trackerPlacement === "drawer") {
+  if (action === "show-settings")
     activateDrawerView("settings");
-  }
+  if (action === "show-macros")
+    activateDrawerView("macros");
+  if (action === "copy-macro")
+    copyMacroReference(button);
   if (action === "expand-preset-editor") {
     event.preventDefault();
     const editor = button.dataset.editor;
@@ -5313,15 +5363,68 @@ function activateDrawerView(view, focusTab = false) {
 }
 function handleRootKeydown(event) {
   const tab = event.target.closest('.scenemap-view-tabs [role="tab"]');
-  if (!tab || mergeSettings(state.settings).trackerPlacement !== "drawer")
+  if (!tab)
     return;
   const keys = ["ArrowLeft", "ArrowRight", "Home", "End"];
   if (!keys.includes(event.key))
     return;
   event.preventDefault();
-  const currentView = tab.dataset.action === "show-tracker" ? "tracker" : "settings";
-  const nextView = event.key === "Home" ? "tracker" : event.key === "End" ? "settings" : currentView === "tracker" ? "settings" : "tracker";
+  const views = availableDrawerViews();
+  const currentView = tab.dataset.action?.replace(/^show-/, "");
+  const currentIndex = currentView ? views.indexOf(currentView) : -1;
+  if (currentIndex < 0)
+    return;
+  const nextIndex = event.key === "Home" ? 0 : event.key === "End" ? views.length - 1 : event.key === "ArrowLeft" ? (currentIndex - 1 + views.length) % views.length : (currentIndex + 1) % views.length;
+  const nextView = views[nextIndex];
   activateDrawerView(nextView, true);
+}
+async function copyMacroReference(button) {
+  const value = button.dataset.copyMacro;
+  if (!value || !(button instanceof HTMLButtonElement))
+    return;
+  button.disabled = true;
+  const originalTitle = `Copy ${value}`;
+  try {
+    await copyTextToClipboard(value);
+    button.innerHTML = checkSvg;
+    button.classList.add("is-copied");
+    button.title = `Copied ${value}`;
+    button.setAttribute("aria-label", button.title);
+    window.setTimeout(() => {
+      if (!button.isConnected)
+        return;
+      button.innerHTML = copySvg;
+      button.classList.remove("is-copied");
+      button.title = originalTitle;
+      button.setAttribute("aria-label", originalTitle);
+    }, 1500);
+  } catch {
+    button.title = "Could not copy macro";
+    button.setAttribute("aria-label", button.title);
+  } finally {
+    button.disabled = false;
+  }
+}
+async function copyTextToClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "true");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  textarea.style.pointerEvents = "none";
+  document.body.appendChild(textarea);
+  textarea.select();
+  textarea.setSelectionRange(0, textarea.value.length);
+  try {
+    if (!document.execCommand("copy"))
+      throw new Error("The browser refused the copy command.");
+  } finally {
+    textarea.remove();
+  }
 }
 async function confirmDeleteTracker() {
   const chatId = state.chatId;
@@ -7245,8 +7348,8 @@ var styles = `
 .scenemap-drawer-scroll { flex: 0 0 auto; min-height: 0; overflow: visible; box-sizing: border-box; padding: 14px; }
 .scenemap-drawer-view { min-height: 0; }
 .scenemap-drawer-view > .scenemap-shell { flex: none; min-height: 0; overflow: visible; padding: 14px 0 0; }
-.scenemap-drawer-view .scenemap-board, .scenemap-drawer-view .scenemap-settings-scroll { flex: none; overflow: visible; }
-.scenemap-drawer-view .scenemap-settings-scroll { padding-right: 0; padding-bottom: 0; }
+.scenemap-drawer-view .scenemap-board, .scenemap-drawer-view .scenemap-settings-scroll, .scenemap-drawer-view .scenemap-macros-scroll { flex: none; overflow: visible; }
+.scenemap-drawer-view .scenemap-settings-scroll, .scenemap-drawer-view .scenemap-macros-scroll { padding-right: 0; padding-bottom: 0; }
 .scenemap-drawer-root > .scenemap-settings-shell { flex: none; overflow: visible; }
 .scenemap-drawer-root > .scenemap-settings-shell .scenemap-settings-scroll { flex: none; overflow: visible; }
 .scenemap-view-tabs { display: flex; gap: 2px; width: min(100%, 380px); box-sizing: border-box; margin: 0 auto; padding: 3px; border: 1px solid var(--lumiverse-border); border-radius: var(--lumiverse-radius-md, 10px); background: var(--lumiverse-fill-subtle); }
@@ -7259,6 +7362,22 @@ var styles = `
 .scenemap-settings-dirty { margin: 0; color: var(--lumiverse-warning, var(--lumiverse-accent)); font-size: 10px; line-height: 1.4; white-space: nowrap; visibility: hidden; }
 .scenemap-settings-dirty.is-visible { visibility: visible; }
 .scenemap-settings-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 12px; padding: 12px 8px 12px 0; }
+.scenemap-macros-shell { gap: 0; }
+.scenemap-macros-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 12px; padding: 12px 8px 12px 0; }
+.scenemap-reference-header { width: 100%; padding: 6px 0 2px; text-align: center; }
+.scenemap-reference-header > span { color: var(--lumiverse-primary-text, var(--lumiverse-primary, var(--lumiverse-accent))); font-size: 10px; font-weight: 800; letter-spacing: .13em; text-transform: uppercase; }
+.scenemap-reference-header h2 { margin: 3px 0 2px; color: var(--lumiverse-text); font-size: 18px; line-height: 1.25; font-weight: 750; }
+.scenemap-macro-section { display: flex; flex-direction: column; gap: 10px; padding: 12px; border: 1px solid var(--lumiverse-border); border-radius: var(--lumiverse-radius-lg, 12px); background: var(--lumiverse-fill-subtle); }
+.scenemap-macro-section h3 { margin: 0; color: var(--lumiverse-text); font-size: 13px; font-weight: 750; }
+.scenemap-macro-section > p { margin: 0; color: var(--lumiverse-text-muted); font-size: 11px; line-height: 1.5; }
+.scenemap-macro-list { display: flex; flex-direction: column; gap: 8px; }
+.scenemap-macro-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px; border: 1px solid var(--lumiverse-secondary-border, var(--lumiverse-border)); border-radius: var(--lumiverse-radius, 8px); background: var(--lumiverse-secondary, rgba(128, 128, 128, .15)); }
+.scenemap-macro-details { min-width: 0; }
+.scenemap-macro-details code { display: block; overflow-wrap: anywhere; color: var(--lumiverse-text); font-family: var(--lumiverse-font-mono, ui-monospace, SFMono-Regular, Consolas, monospace); font-size: 12px; font-weight: 700; }
+.scenemap-macro-details span { display: block; margin-top: 4px; color: var(--lumiverse-text-muted); font-size: 11px; line-height: 1.45; }
+.scenemap-lv .scenemap-macro-copy { flex: 0 0 30px; width: 30px; height: 30px; padding: 6px; color: var(--lumiverse-primary-text, var(--lumiverse-primary, var(--lumiverse-accent))); background: transparent; }
+.scenemap-lv .scenemap-macro-copy svg { display: block; width: 100%; height: 100%; }
+.scenemap-lv .scenemap-macro-copy.is-copied { color: var(--lumiverse-success, #22c55e); border-color: var(--lumiverse-success-050, rgba(34, 197, 94, .5)); background: var(--lumiverse-success-015, rgba(34, 197, 94, .15)); }
 .scenemap-settings-group { border: 1px solid var(--lumiverse-border); background: var(--lumiverse-fill-subtle); border-radius: var(--lumiverse-radius, 8px); padding: 12px; }
 .scenemap-settings-group h3 { margin: 0 0 10px; color: var(--lumiverse-accent); font-size: 11px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
 .scenemap-settings-shell label { display: flex; flex-direction: column; gap: 5px; margin: 10px 0; font-size: 12px; color: var(--lumiverse-text-muted); }
@@ -7294,12 +7413,6 @@ var styles = `
 .scenemap-preset-editor textarea[data-preset-editor="systemPrompt"], .scenemap-preset-editor textarea[data-preset-editor="userPrompt"] { min-height: 150px; font-family: inherit; }
 .scenemap-preset-editor textarea:focus { outline: none; border-color: var(--lumiverse-primary, var(--lumiverse-accent)); box-shadow: 0 0 0 1px var(--lumiverse-primary-020, transparent); }
 .scenemap-preset-schema-error { margin-top: -4px; }
-.scenemap-macro-reference { border: 1px solid var(--lumiverse-border); border-radius: var(--lumiverse-radius, 8px); background: var(--lumiverse-secondary, rgba(128, 128, 128, .15)); padding: 8px 10px; color: var(--lumiverse-text-muted); font-size: 11px; }
-.scenemap-macro-reference summary { color: var(--lumiverse-text); cursor: pointer; font-weight: 650; }
-.scenemap-macro-reference p { margin: 9px 0; line-height: 1.45; }
-.scenemap-macro-reference ul { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; }
-.scenemap-macro-reference li { display: grid; grid-template-columns: minmax(185px, auto) 1fr; gap: 8px; align-items: baseline; }
-.scenemap-macro-reference code { color: var(--lumiverse-primary-text, var(--lumiverse-primary)); overflow-wrap: anywhere; }
 .scenemap-preset-layout-row { display: flex; justify-content: flex-end; gap: 8px; }
 .scenemap-preset-layout-row .scenemap-primary { min-width: 112px; }
 .scenemap-settings-shell input:not([type="checkbox"]), .scenemap-editor textarea, .scenemap-layout-editor input, .scenemap-name-editor input {
@@ -7388,7 +7501,6 @@ body.scenemap-layout-is-dragging, body.scenemap-layout-is-dragging * { cursor: g
 .scenemap-runtime-error, .scenemap-inline-error { border: 1px solid rgba(255, 100, 100, 0.45); color: #ffb8b8; background: rgba(120, 0, 0, 0.18); border-radius: var(--lumiverse-radius, 8px); padding: 10px; font-size: 12px; }
 .scenemap-sr-only { position: absolute !important; width: 1px !important; height: 1px !important; padding: 0 !important; margin: -1px !important; overflow: hidden !important; clip: rect(0, 0, 0, 0) !important; white-space: nowrap !important; border: 0 !important; }
 @media (max-width: 760px) {
-  .scenemap-macro-reference li { grid-template-columns: minmax(0, 1fr); gap: 2px; }
   .scenemap-layout-section-header { grid-template-columns: minmax(0, 1fr) auto; align-items: end; }
   .scenemap-layout-section-header .scenemap-layout-actions { grid-column: 2; flex-wrap: nowrap; }
   .scenemap-layout-section-header .scenemap-layout-icon-btn, .scenemap-layout-section-header .scenemap-layout-drag-handle { width: 44px; height: 44px; min-width: 44px; }
