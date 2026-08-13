@@ -2211,6 +2211,7 @@ var SCENEMAP_PROMPT_MACROS = [
   { token: "{{scenemap_example_section}}", description: "Complete example section, or empty when no valid example is available." },
   { token: "{{scenemap_mode}}", description: 'Current operation: "full" or "partial".' },
   { token: "{{scenemap_selected_fields}}", description: "Fields selected for partial regeneration, otherwise empty." },
+  { token: "{{scenemap_feedback}}", description: "Optional user feedback supplied for partial regeneration, otherwise empty." },
   { token: "{{scenemap_partial_task}}", description: "Partial-regeneration contract, otherwise empty." }
 ];
 var LEGACY_SCENEMAP_PROMPT_MACROS = [
@@ -5242,6 +5243,10 @@ function openRegenerationModal() {
         </span>
       </label>
       ${snapshot.schemaMatchesCurrent ? `<div class="scenemap-regeneration-fields">${fieldMarkup || `<p class="scenemap-regeneration-note">This tracker has no individual values to select.</p>`}</div>` : `<p class="scenemap-regeneration-note is-warning">This tracker uses another or unknown schema. Regenerate the entire tracker before updating individual fields.</p>`}
+      <label class="scenemap-regeneration-feedback" hidden>
+        <span>Feedback for the AI <small>Optional</small></span>
+        <textarea data-regeneration-feedback maxlength="4000" rows="3" placeholder="Explain what is wrong and how this field should be corrected."></textarea>
+      </label>
     </div>
     <div class="scenemap-inline-error" role="alert" data-regeneration-error hidden></div>
     <div class="scenemap-modal-actions">
@@ -5254,6 +5259,12 @@ function openRegenerationModal() {
     const mode = root.querySelector(`input[name="${CSS.escape(modeName)}"]:checked`)?.value ?? "entire";
     const selectedCount = root.querySelectorAll("[data-regeneration-field]:checked").length;
     root.classList.toggle("is-selecting-fields", mode === "fields");
+    const feedbackField = root.querySelector(".scenemap-regeneration-feedback");
+    const feedbackInput = root.querySelector("[data-regeneration-feedback]");
+    if (feedbackField)
+      feedbackField.hidden = mode !== "fields";
+    if (feedbackInput)
+      feedbackInput.disabled = mode !== "fields";
     const submit = root.querySelector('[data-regeneration-action="submit"]');
     if (submit) {
       submit.disabled = mode === "fields" && selectedCount === 0;
@@ -5297,6 +5308,7 @@ function openRegenerationModal() {
       return;
     }
     const paths = Array.from(root.querySelectorAll("[data-regeneration-field]:checked")).map((input) => Number(input.dataset.regenerationField)).filter((index2) => Number.isSafeInteger(index2) && fields[index2]).map((index2) => fields[index2].path);
+    const feedback = root.querySelector("[data-regeneration-feedback]")?.value ?? "";
     if (paths.length === 0) {
       syncControls();
       return;
@@ -5306,7 +5318,8 @@ function openRegenerationModal() {
       type: "regenerate_fields",
       messageId: snapshot.messageId,
       swipeId: snapshot.swipeId,
-      paths
+      paths,
+      feedback
     });
   };
   root.addEventListener("change", handleChange);
@@ -7447,6 +7460,12 @@ body:has([data-spindle-modal] .scenemap-layout-editor) > [role="listbox"] { z-in
 .scenemap-regeneration-field:hover { background: var(--lumiverse-secondary, rgba(128, 128, 128, .15)); }
 .scenemap-regeneration-note { margin: 4px 0 0; padding: 10px 11px; border: 1px solid var(--lumiverse-border); border-radius: var(--lumiverse-radius, 8px); color: var(--lumiverse-text-muted); background: var(--lumiverse-fill-subtle); font-size: 12px; line-height: 1.45; }
 .scenemap-regeneration-note.is-warning { color: var(--lumiverse-warning, #f59e0b); border-color: var(--lumiverse-warning-050, color-mix(in srgb, var(--lumiverse-warning) 50%, transparent)); background: var(--lumiverse-warning-015, color-mix(in srgb, var(--lumiverse-warning) 15%, transparent)); }
+.scenemap-regeneration-feedback { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; color: var(--lumiverse-text); font-size: 12px; }
+.scenemap-regeneration-feedback[hidden] { display: none; }
+.scenemap-regeneration-feedback > span { font-weight: 700; }
+.scenemap-regeneration-feedback > span small { margin-left: 5px; color: var(--lumiverse-text-muted); font-size: 10px; font-weight: 500; text-transform: uppercase; }
+.scenemap-regeneration-feedback textarea { width: 100%; min-height: 76px; box-sizing: border-box; resize: vertical; border: 1px solid var(--lumiverse-border); border-radius: var(--lumiverse-radius, 8px); outline: none; background: var(--lumiverse-secondary, rgba(128, 128, 128, .15)); color: var(--lumiverse-text); padding: 9px 10px; font: inherit; line-height: 1.45; }
+.scenemap-regeneration-feedback textarea:focus { border-color: var(--lumiverse-primary, var(--lumiverse-accent)); box-shadow: 0 0 0 1px var(--lumiverse-primary-020, transparent); }
 .scenemap-regeneration-modal > .scenemap-modal-actions { flex: 0 0 auto; padding-top: 2px; }
 .scenemap-name-editor { display: flex; flex-direction: column; gap: 12px; color: var(--lumiverse-text); }
 .scenemap-name-editor label { display: flex; flex-direction: column; gap: 5px; color: var(--lumiverse-text-muted); font-size: 12px; }

@@ -20,6 +20,7 @@ const values: SceneMapPromptTemplateValues = {
   context: "CONTEXT",
   mode: "full",
   selectedFields: "",
+  feedback: "",
   partialTask: "",
   chatHistory: [" first ", "second\r\nline", "third"],
 };
@@ -40,6 +41,14 @@ describe("SceneMap prompt templates", () => {
   test("limits chat history from the end while preserving chronological order", () => {
     expect(renderSceneMapPromptTemplate("{{scenemap_chat_history:: 2 }}", values))
       .toBe("second\nline\n\nthird");
+  });
+
+  test("expands partial-regeneration feedback", () => {
+    expect(renderSceneMapPromptTemplate("Feedback: {{scenemap_feedback}}", {
+      ...values,
+      mode: "partial",
+      feedback: "The position contradicts the final message.",
+    })).toBe("Feedback: The position contradicts the final message.");
   });
 
   test("rejects invalid chat history limits", () => {

@@ -13,6 +13,7 @@ export type SceneMapPromptTemplateValues = {
   context: string;
   mode: SceneMapPromptMode;
   selectedFields: string;
+  feedback: string;
   partialTask: string;
   chatHistory: readonly string[];
 };
@@ -31,6 +32,7 @@ export const SCENEMAP_PROMPT_MACROS = [
   { token: "{{scenemap_example_section}}", description: "Complete example section, or empty when no valid example is available." },
   { token: "{{scenemap_mode}}", description: 'Current operation: "full" or "partial".' },
   { token: "{{scenemap_selected_fields}}", description: "Fields selected for partial regeneration, otherwise empty." },
+  { token: "{{scenemap_feedback}}", description: "Optional user feedback supplied for partial regeneration, otherwise empty." },
   { token: "{{scenemap_partial_task}}", description: "Partial-regeneration contract, otherwise empty." },
 ] as const;
 
@@ -61,6 +63,7 @@ const valueKeys: Record<string, keyof SceneMapPromptTemplateValues> = {
   scenemap_context: "context",
   scenemap_mode: "mode",
   scenemap_selected_fields: "selectedFields",
+  scenemap_feedback: "feedback",
   scenemap_partial_task: "partialTask",
 };
 

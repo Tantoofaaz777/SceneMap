@@ -14,6 +14,7 @@ var SCENEMAP_PROMPT_MACROS = [
   { token: "{{scenemap_example_section}}", description: "Complete example section, or empty when no valid example is available." },
   { token: "{{scenemap_mode}}", description: 'Current operation: "full" or "partial".' },
   { token: "{{scenemap_selected_fields}}", description: "Fields selected for partial regeneration, otherwise empty." },
+  { token: "{{scenemap_feedback}}", description: "Optional user feedback supplied for partial regeneration, otherwise empty." },
   { token: "{{scenemap_partial_task}}", description: "Partial-regeneration contract, otherwise empty." }
 ];
 var legacyAliases = {
@@ -35,6 +36,7 @@ var valueKeys = {
   scenemap_context: "context",
   scenemap_mode: "mode",
   scenemap_selected_fields: "selectedFields",
+  scenemap_feedback: "feedback",
   scenemap_partial_task: "partialTask"
 };
 var ownedMacroPattern = /\{\{\s*([a-z_]+)(?:\s*::\s*([^{}]*?))?\s*\}\}/gi;
@@ -2873,7 +2875,7 @@ async function resolveRegisteredPromptMacro(context) {
     return compactText(context.env?.character?.scenario);
   if (name === "scenemap_mode")
     return "full";
-  if (name === "scenemap_selected_fields" || name === "scenemap_partial_task")
+  if (name === "scenemap_selected_fields" || name === "scenemap_feedback" || name === "scenemap_partial_task")
     return "";
   if (typeof chatId !== "string" || !chatId)
     return "";
@@ -3013,7 +3015,18 @@ function buildSelectedFieldsPrompt(selections) {
 
 `);
 }
-function buildPartialRegenerationTask(tracker, selectedFields, responseSchema) {
+function normalizeRegenerationFeedback(value) {
+  if (value === undefined || value === null)
+    return "";
+  if (typeof value !== "string")
+    throw new Error("Partial-regeneration feedback must be text.");
+  const feedback = value.replace(/\r\n/g, `
+`).trim();
+  if (feedback.length > 4000)
+    throw new Error("Partial-regeneration feedback cannot exceed 4000 characters.");
+  return feedback;
+}
+function buildPartialRegenerationTask(tracker, selectedFields, responseSchema, feedback) {
   return [
     "PARTIAL TRACKER UPDATE TASK (this output contract takes precedence):",
     "Regenerate only the selected tracker fields using the conversation and reference context.",
@@ -3025,13 +3038,14 @@ function buildPartialRegenerationTask(tracker, selectedFields, responseSchema) {
     "",
     "SELECTED FIELDS:",
     selectedFields,
+    ...feedback ? ["", "USER FEEDBACK:", feedback] : [],
     "",
     "RESPONSE JSON SCHEMA:",
     JSON.stringify(responseSchema, null, 2)
   ].join(`
 `);
 }
-async function regenerateTrackerFields(messageId, swipeId, rawPaths, userId) {
+async function regenerateTrackerFields(messageId, swipeId, rawPaths, rawFeedback, userId) {
   if (!userId)
     throw new Error("SceneMap needs a user context before regenerating tracker fields.");
   if (typeof messageId !== "string" || !messageId)
@@ -3039,6 +3053,7 @@ async function regenerateTrackerFields(messageId, swipeId, rawPaths, userId) {
   if (!Number.isSafeInteger(swipeId) || swipeId < 0)
     throw new Error("The tracker swipe is invalid.");
   const paths = normalizeTrackerPaths(rawPaths);
+  const feedback = normalizeRegenerationFeedback(rawFeedback);
   const activeGeneration = activeGenerations.get(userId);
   if (activeGeneration) {
     sendGenerationStatus(userId);
@@ -3116,7 +3131,8 @@ ${exampleResponse}
       ...referenceValues,
       mode: "partial",
       selectedFields,
-      partialTask: buildPartialRegenerationTask(baseline, selectedFields, responseSchema),
+      feedback,
+      partialTask: buildPartialRegenerationTask(baseline, selectedFields, responseSchema, feedback),
       chatHistory: getPromptChatHistory(messages, target.id)
     }, context), controller.signal);
     spindle.toast.info(selections.length === 1 ? "Regenerating selected field..." : `Regenerating ${selections.length} selected fields...`, { title: "SceneMap", userId });
@@ -3221,6 +3237,7 @@ ${exampleResponse}
       ...referenceValues,
       mode: "full",
       selectedFields: "",
+      feedback: "",
       partialTask: "",
       chatHistory: getPromptChatHistory(messages, target.id)
     }, context), controller.signal);
@@ -3425,7 +3442,7 @@ spindle.onFrontendMessage(async (payload, userId) => {
         await generateTracker(userId);
         break;
       case "regenerate_fields":
-        await regenerateTrackerFields(payload.messageId, payload.swipeId, payload.paths, userId);
+        await regenerateTrackerFields(payload.messageId, payload.swipeId, payload.paths, payload.feedback, userId);
         break;
       case "cancel_generation":
         cancelTrackerGeneration(userId);

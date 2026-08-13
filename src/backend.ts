@@ -671,7 +671,7 @@ async function resolveRegisteredPromptMacro(context: SceneMapMacroContext): Prom
   if (name === "scenemap_persona") return compactText(context.env?.character?.persona);
   if (name === "scenemap_scenario") return compactText(context.env?.character?.scenario);
   if (name === "scenemap_mode") return "full";
-  if (name === "scenemap_selected_fields" || name === "scenemap_partial_task") return "";
+  if (name === "scenemap_selected_fields" || name === "scenemap_feedback" || name === "scenemap_partial_task") return "";
   if (typeof chatId !== "string" || !chatId) return "";
 
   try {
@@ -831,10 +831,19 @@ function buildSelectedFieldsPrompt(
   ].join("\n")).join("\n\n");
 }
 
+function normalizeRegenerationFeedback(value: unknown): string {
+  if (value === undefined || value === null) return "";
+  if (typeof value !== "string") throw new Error("Partial-regeneration feedback must be text.");
+  const feedback = value.replace(/\r\n/g, "\n").trim();
+  if (feedback.length > 4000) throw new Error("Partial-regeneration feedback cannot exceed 4000 characters.");
+  return feedback;
+}
+
 function buildPartialRegenerationTask(
   tracker: unknown,
   selectedFields: string,
   responseSchema: Record<string, unknown>,
+  feedback: string,
 ): string {
   return [
     "PARTIAL TRACKER UPDATE TASK (this output contract takes precedence):",
@@ -847,6 +856,7 @@ function buildPartialRegenerationTask(
     "",
     "SELECTED FIELDS:",
     selectedFields,
+    ...(feedback ? ["", "USER FEEDBACK:", feedback] : []),
     "",
     "RESPONSE JSON SCHEMA:",
     JSON.stringify(responseSchema, null, 2),
@@ -857,12 +867,14 @@ async function regenerateTrackerFields(
   messageId: unknown,
   swipeId: unknown,
   rawPaths: unknown,
+  rawFeedback: unknown,
   userId?: string,
 ) {
   if (!userId) throw new Error("SceneMap needs a user context before regenerating tracker fields.");
   if (typeof messageId !== "string" || !messageId) throw new Error("The tracker message is missing.");
   if (!Number.isSafeInteger(swipeId) || (swipeId as number) < 0) throw new Error("The tracker swipe is invalid.");
   const paths = normalizeTrackerPaths(rawPaths);
+  const feedback = normalizeRegenerationFeedback(rawFeedback);
   const activeGeneration = activeGenerations.get(userId);
   if (activeGeneration) {
     sendGenerationStatus(userId);
@@ -943,7 +955,8 @@ async function regenerateTrackerFields(
         ...referenceValues,
         mode: "partial",
         selectedFields,
-        partialTask: buildPartialRegenerationTask(baseline, selectedFields, responseSchema),
+        feedback,
+        partialTask: buildPartialRegenerationTask(baseline, selectedFields, responseSchema, feedback),
         chatHistory: getPromptChatHistory(messages, target.id),
       }, context),
       controller.signal,
@@ -1088,6 +1101,7 @@ async function generateTracker(userId?: string, expectedLatestMessageId?: string
         ...referenceValues,
         mode: "full",
         selectedFields: "",
+        feedback: "",
         partialTask: "",
         chatHistory: getPromptChatHistory(messages, target.id),
       }, context),
@@ -1319,7 +1333,7 @@ spindle.onFrontendMessage(async (payload: any, userId?: string) => {
         await generateTracker(userId);
         break;
       case "regenerate_fields":
-        await regenerateTrackerFields(payload.messageId, payload.swipeId, payload.paths, userId);
+        await regenerateTrackerFields(payload.messageId, payload.swipeId, payload.paths, payload.feedback, userId);
         break;
       case "cancel_generation":
         cancelTrackerGeneration(userId);
