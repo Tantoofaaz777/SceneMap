@@ -1255,14 +1255,8 @@ async function deleteTracker(messageId: string, userId?: string) {
   if (!chat) throw new Error("Open a chat before deleting a tracker.");
   const message = messages.find((item) => item.id === messageId);
   if (!message) throw new Error("Message not found.");
-  const { confirmed } = await spindle.modal.confirm({
-    title: "Delete Tracker",
-    message: "This will permanently remove SceneMap data from this message.",
-    variant: "danger",
-    confirmLabel: "Delete",
-    userId,
-  });
-  if (!confirmed) return;
+  // The frontend confirms this destructive action before sending the command.
+  // Re-fetch only for concurrency safety, not to show a duplicate confirmation.
   const currentMessages = (await spindle.chat.getMessages(chat.id)) as ChatMessage[];
   const currentMessage = currentMessages.find((item) => item.id === messageId);
   if (!currentMessage) throw new Error("Message was deleted before its tracker could be removed.");

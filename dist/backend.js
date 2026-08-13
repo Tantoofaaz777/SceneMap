@@ -3366,15 +3366,6 @@ async function deleteTracker(messageId, userId) {
   const message = messages.find((item) => item.id === messageId);
   if (!message)
     throw new Error("Message not found.");
-  const { confirmed } = await spindle.modal.confirm({
-    title: "Delete Tracker",
-    message: "This will permanently remove SceneMap data from this message.",
-    variant: "danger",
-    confirmLabel: "Delete",
-    userId
-  });
-  if (!confirmed)
-    return;
   const currentMessages = await spindle.chat.getMessages(chat.id);
   const currentMessage = currentMessages.find((item) => item.id === messageId);
   if (!currentMessage)
