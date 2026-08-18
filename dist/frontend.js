@@ -4092,6 +4092,7 @@ var dockRootRef = null;
 var toolbarRootRef = null;
 var topToolbarRootRef = null;
 var topToolbarTapTimer = null;
+var topToolbarOpenTimer = null;
 var topToolbarSuppressClickUntil = Number.NEGATIVE_INFINITY;
 var tabHandle = null;
 var dockPanelHandle = null;
@@ -6209,6 +6210,7 @@ function handleTopToolbarClick(event) {
     return;
   if (performance.now() < topToolbarSuppressClickUntil) {
     event.preventDefault();
+    event.stopPropagation();
     return;
   }
   scheduleTopToolbarTap(TOP_TOOLBAR_DOUBLE_CLICK_MS);
@@ -6229,7 +6231,12 @@ function scheduleTopToolbarTap(delay) {
   if (topToolbarTapTimer) {
     clearTimeout(topToolbarTapTimer);
     topToolbarTapTimer = null;
-    openTrackerSurface();
+    if (topToolbarOpenTimer)
+      clearTimeout(topToolbarOpenTimer);
+    topToolbarOpenTimer = setTimeout(() => {
+      topToolbarOpenTimer = null;
+      openTrackerSurface();
+    }, 0);
     return;
   }
   topToolbarTapTimer = setTimeout(() => {
@@ -6259,6 +6266,9 @@ function resetTopToolbarTapState() {
   if (topToolbarTapTimer)
     clearTimeout(topToolbarTapTimer);
   topToolbarTapTimer = null;
+  if (topToolbarOpenTimer)
+    clearTimeout(topToolbarOpenTimer);
+  topToolbarOpenTimer = null;
   topToolbarSuppressClickUntil = Number.NEGATIVE_INFINITY;
 }
 function destroyTopToolbarButton() {

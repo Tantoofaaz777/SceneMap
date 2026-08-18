@@ -64,6 +64,7 @@ let dockRootRef: HTMLElement | null = null;
 let toolbarRootRef: Element | null = null;
 let topToolbarRootRef: Element | null = null;
 let topToolbarTapTimer: ReturnType<typeof setTimeout> | null = null;
+let topToolbarOpenTimer: ReturnType<typeof setTimeout> | null = null;
 let topToolbarSuppressClickUntil = Number.NEGATIVE_INFINITY;
 let tabHandle: ReturnType<SpindleFrontendContext["ui"]["registerDrawerTab"]> | null = null;
 let dockPanelHandle: ReturnType<SpindleFrontendContext["ui"]["requestDockPanel"]> | null = null;
@@ -2389,6 +2390,7 @@ function handleTopToolbarClick(event: Event) {
   // fallback for assistive technology and browsers without Pointer Events.
   if (performance.now() < topToolbarSuppressClickUntil) {
     event.preventDefault();
+    event.stopPropagation();
     return;
   }
   scheduleTopToolbarTap(TOP_TOOLBAR_DOUBLE_CLICK_MS);
@@ -2409,7 +2411,14 @@ function scheduleTopToolbarTap(delay: number) {
   if (topToolbarTapTimer) {
     clearTimeout(topToolbarTapTimer);
     topToolbarTapTimer = null;
-    openTrackerSurface();
+    // Opening a mobile drawer synchronously from pointerup lets the synthetic
+    // click land on the newly mounted backdrop and close it immediately. Run
+    // after the activation event has finished propagating instead.
+    if (topToolbarOpenTimer) clearTimeout(topToolbarOpenTimer);
+    topToolbarOpenTimer = setTimeout(() => {
+      topToolbarOpenTimer = null;
+      openTrackerSurface();
+    }, 0);
     return;
   }
   topToolbarTapTimer = setTimeout(() => {
@@ -2440,6 +2449,8 @@ function openTrackerSurface() {
 function resetTopToolbarTapState() {
   if (topToolbarTapTimer) clearTimeout(topToolbarTapTimer);
   topToolbarTapTimer = null;
+  if (topToolbarOpenTimer) clearTimeout(topToolbarOpenTimer);
+  topToolbarOpenTimer = null;
   topToolbarSuppressClickUntil = Number.NEGATIVE_INFINITY;
 }
 
