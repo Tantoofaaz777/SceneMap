@@ -4090,10 +4090,7 @@ var ctxRef = null;
 var rootRef = null;
 var dockRootRef = null;
 var toolbarRootRef = null;
-var topToolbarInjection = null;
-var topToolbarObserver = null;
-var topToolbarObservationRoot = null;
-var topToolbarEnsureQueued = false;
+var topToolbarRootRef = null;
 var topToolbarTapTimer = null;
 var topToolbarSuppressClickUntil = Number.NEGATIVE_INFINITY;
 var tabHandle = null;
@@ -4161,9 +4158,16 @@ function setup(ctx) {
     syncTrackerPlacement();
     renderDrawerContent();
   });
-  const toolbarRoot = ctx.ui.mount("chat_toolbar");
+  const mountHostPoint = ctx.ui.mount;
+  const toolbarRoot = mountHostPoint("chat_actions");
+  const topToolbarRoot = mountHostPoint("chat_top_dock");
   toolbarRootRef = toolbarRoot;
+  topToolbarRootRef = topToolbarRoot;
   toolbarRoot.classList.add("scenemap-chat-toolbar-root");
+  topToolbarRoot.classList.add("scenemap-top-toolbar-host");
+  topToolbarRoot.addEventListener("click", handleTopToolbarClick);
+  topToolbarRoot.addEventListener("pointerup", handleTopToolbarPointerUp);
+  topToolbarRoot.addEventListener("keydown", handleTopToolbarKeydown);
   render();
   const offBackend = ctx.onBackendMessage((payload) => {
     if (payload?.type === "state") {
@@ -4261,6 +4265,9 @@ function setup(ctx) {
     rootRef?.removeEventListener("keydown", handleRootKeydown);
     dockRootRef?.removeEventListener("click", handleClick);
     toolbarRoot.removeEventListener("click", handleClick);
+    topToolbarRoot.removeEventListener("click", handleTopToolbarClick);
+    topToolbarRoot.removeEventListener("pointerup", handleTopToolbarPointerUp);
+    topToolbarRoot.removeEventListener("keydown", handleTopToolbarKeydown);
     offBackend();
     for (const off2 of offEvents)
       off2();
@@ -4278,6 +4285,7 @@ function setup(ctx) {
     rootRef = null;
     dockRootRef = null;
     toolbarRootRef = null;
+    topToolbarRootRef = null;
     tabHandle = null;
     appliedTrackerPlacement = null;
     hasReceivedInitialState = false;
@@ -4403,7 +4411,6 @@ function render(options = {}) {
   if (!options.preserveSettingsSurface)
     renderDrawerContent();
   renderChatToolbar();
-  syncTopToolbarPlacement();
   renderTopToolbarButton();
   tabHandle?.setBadge(state.messagesBehind > 0 ? String(state.messagesBehind) : null);
 }
@@ -5660,10 +5667,8 @@ function updateSettingFromControl(target, key, immediate) {
   }
   if (key === "showInputBarButton")
     renderChatToolbar();
-  if (key === "showTopToolbarButton") {
-    syncTopToolbarPlacement();
+  if (key === "showTopToolbarButton")
     renderTopToolbarButton();
-  }
   if (key === "trackerPlacement")
     render();
 }
@@ -6161,53 +6166,32 @@ function renderChildField(child, childIndex, sectionIndex, fieldIndex, options) 
     </div>
   `;
 }
-function syncTopToolbarPlacement() {
-  if (!ctxRef || !hasReceivedInitialState || !state.settings.showTopToolbarButton) {
-    stopTopToolbarObserver();
-    clearTopToolbarInjection();
-    return;
-  }
-  observeTopToolbar();
-  ensureTopToolbarInjection();
-}
-function ensureTopToolbarInjection() {
-  const ctx = ctxRef;
-  if (!ctx || !hasReceivedInitialState || !state.settings.showTopToolbarButton)
-    return;
-  const toolbar = document.querySelector('[class*="chatToolbar"]');
-  if (!toolbar)
-    return;
-  if (topToolbarInjection?.isConnected && topToolbarInjection.parentElement === toolbar)
-    return;
-  clearTopToolbarInjection();
-  topToolbarInjection = ctx.dom.inject(toolbar, '<span class="scenemap-top-toolbar-host"><button type="button" class="scenemap-top-toolbar-btn" data-scenemap-top-toolbar-button></button></span>', "beforeend");
-  topToolbarInjection.addEventListener("click", handleTopToolbarClick);
-  topToolbarInjection.addEventListener("pointerup", handleTopToolbarPointerUp);
-  topToolbarInjection.addEventListener("keydown", handleTopToolbarKeydown);
-  renderTopToolbarButton();
-}
 function renderTopToolbarButton() {
-  if (!state.settings.showTopToolbarButton)
+  const root = topToolbarRootRef;
+  if (!root)
     return;
-  if (!topToolbarInjection?.isConnected) {
-    scheduleTopToolbarEnsure();
+  if (!hasReceivedInitialState || !state.settings.showTopToolbarButton) {
+    resetTopToolbarTapState();
+    root.replaceChildren();
     return;
   }
-  const button = topToolbarInjection.querySelector("[data-scenemap-top-toolbar-button]");
-  if (!button)
-    return;
   const isGenerating = Boolean(state.generationActive || isGenerationRequestPending);
   const isEditing = Boolean(getCurrentTrackerEditSession());
   const status = getTopToolbarStatus(state, isGenerationRequestPending);
   const actionLabel = isEditing ? "Save or cancel the tracker edit first" : isGenerating ? "Cancel SceneMap generation" : state.latest ? "Regenerate SceneMap" : "Generate SceneMap";
   const accessibleLabel = `${actionLabel} — ${status.text}`;
-  button.className = `scenemap-top-toolbar-btn is-${status.tone} ${isGenerating ? "is-generating" : ""}`;
-  button.title = `${accessibleLabel} — Double-click to open tracker`;
-  button.setAttribute("aria-label", accessibleLabel);
-  button.disabled = isEditing || !state.activeMessageId && !isGenerating;
-  button.innerHTML = `
-    <span class="scenemap-top-toolbar-dot" aria-hidden="true"></span>
-    <span class="scenemap-top-toolbar-icon" aria-hidden="true">${isGenerating ? refreshSvg() : iconSvg}</span>
+  root.innerHTML = `
+    <button
+      type="button"
+      class="scenemap-top-toolbar-btn is-${status.tone} ${isGenerating ? "is-generating" : ""}"
+      data-scenemap-top-toolbar-button
+      title="${escapeAttr(`${accessibleLabel} — Double-click to open tracker`)}"
+      aria-label="${escapeAttr(accessibleLabel)}"
+      ${isEditing || !state.activeMessageId && !isGenerating ? "disabled" : ""}
+    >
+      <span class="scenemap-top-toolbar-dot" aria-hidden="true"></span>
+      <span class="scenemap-top-toolbar-icon" aria-hidden="true">${isGenerating ? refreshSvg() : iconSvg}</span>
+    </button>
   `;
 }
 function handleTopToolbarPointerUp(event) {
@@ -6254,7 +6238,7 @@ function scheduleTopToolbarTap(delay) {
   }, delay);
 }
 function runTopToolbarPrimaryAction() {
-  const button = topToolbarInjection?.querySelector("[data-scenemap-top-toolbar-button]");
+  const button = topToolbarRootRef?.querySelector("[data-scenemap-top-toolbar-button]");
   if (!button || button.disabled)
     return;
   const command = getGenerationButtonCommand(state.generationActive, isGenerationRequestPending);
@@ -6271,51 +6255,15 @@ function openTrackerSurface() {
   dockPanelHandle?.expand();
   renderDockPanel();
 }
-function observeTopToolbar() {
-  const root = document.querySelector('[class*="chatColumnInner"]') ?? document.querySelector('[class*="chatColumn"]') ?? document.body;
-  if (topToolbarObserver && topToolbarObservationRoot === root && root.isConnected)
-    return;
-  stopTopToolbarObserver();
-  topToolbarObservationRoot = root;
-  topToolbarObserver = new MutationObserver((records) => {
-    if (records.every((record) => record.target instanceof Element && record.target.closest(".scenemap-top-toolbar-host")))
-      return;
-    scheduleTopToolbarEnsure();
-  });
-  topToolbarObserver.observe(root, { childList: true, subtree: true });
-}
-function scheduleTopToolbarEnsure() {
-  if (topToolbarEnsureQueued)
-    return;
-  topToolbarEnsureQueued = true;
-  queueMicrotask(() => {
-    topToolbarEnsureQueued = false;
-    ensureTopToolbarInjection();
-  });
-}
-function clearTopToolbarInjection() {
-  const injection = topToolbarInjection;
-  topToolbarInjection = null;
+function resetTopToolbarTapState() {
   if (topToolbarTapTimer)
     clearTimeout(topToolbarTapTimer);
   topToolbarTapTimer = null;
   topToolbarSuppressClickUntil = Number.NEGATIVE_INFINITY;
-  if (!injection)
-    return;
-  injection.removeEventListener("click", handleTopToolbarClick);
-  injection.removeEventListener("pointerup", handleTopToolbarPointerUp);
-  injection.removeEventListener("keydown", handleTopToolbarKeydown);
-  ctxRef?.dom.uninject(injection);
-}
-function stopTopToolbarObserver() {
-  topToolbarObserver?.disconnect();
-  topToolbarObserver = null;
-  topToolbarObservationRoot = null;
 }
 function destroyTopToolbarButton() {
-  stopTopToolbarObserver();
-  clearTopToolbarInjection();
-  topToolbarEnsureQueued = false;
+  resetTopToolbarTapState();
+  topToolbarRootRef?.replaceChildren();
 }
 function getDisplayOptions(allowCards) {
   const displays = [
@@ -7173,7 +7121,6 @@ var styles = `
 .scenemap-loading-dots span { display: inline-block; animation: scenemap-dot-fade 1.2s ease-in-out infinite; }
 .scenemap-loading-dots span:nth-child(2) { animation-delay: .16s; }
 .scenemap-loading-dots span:nth-child(3) { animation-delay: .32s; }
-[data-spindle-mount="chat_toolbar"]:has(.scenemap-chat-toolbar-root) { display: flex; align-items: center; gap: 2px; }
 .scenemap-chat-toolbar-root { display: inline-flex; align-items: center; }
 .scenemap-chat-toolbar-btn { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 26px; padding: 0; border: 0; border-radius: var(--lumiverse-radius-sm, 5px); background: transparent; color: var(--lumiverse-text-dim, rgba(230, 230, 240, .4)); cursor: pointer; transition: color .12s ease, background .12s ease; }
 .scenemap-chat-toolbar-btn:hover:not(:disabled) { color: var(--lumiverse-text, rgba(230, 230, 240, .92)); background: var(--lumiverse-fill, rgba(255, 255, 255, .06)); }
