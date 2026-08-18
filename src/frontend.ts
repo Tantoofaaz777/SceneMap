@@ -70,10 +70,6 @@ let topToolbarTapTimer: ReturnType<typeof setTimeout> | null = null;
 let topToolbarSuppressClickUntil = Number.NEGATIVE_INFINITY;
 let tabHandle: ReturnType<SpindleFrontendContext["ui"]["registerDrawerTab"]> | null = null;
 let dockPanelHandle: ReturnType<SpindleFrontendContext["ui"]["requestDockPanel"]> | null = null;
-let dockResizeObserver: MutationObserver | null = null;
-let dockPanelWidth = 380;
-let dockPanelHeight = 380;
-const decoratedDockResizeHandles = new Set<HTMLElement>();
 let dockPanelError: string | null = null;
 let settingsRuntimeError: string | null = null;
 let trackerRuntimeError: string | null = null;
@@ -124,6 +120,13 @@ type PresetEditorDraft = {
 
 type PresetTextEditor = "schema" | "systemPrompt" | "userPrompt";
 
+// Dock geometry landed in the Lumiverse runtime before it was added to the
+// published Spindle option type. Keep the temporary widening local so the rest
+// of the frontend continues to follow the public API exactly.
+type DockPanelOptionsWithGeometry = Parameters<SpindleFrontendContext["ui"]["requestDockPanel"]>[0] & {
+  persistGeometry: string;
+};
+
 const presetEditorDrafts = new Map<string, PresetEditorDraft>();
 
 type PendingTextEditor = {
@@ -155,8 +158,6 @@ export function setup(ctx: SpindleFrontendContext) {
   automaticSaveTimer = null;
   if (drawerScrollRestoreFrame !== null) cancelAnimationFrame(drawerScrollRestoreFrame);
   drawerScrollRestoreFrame = null;
-  dockPanelWidth = readStoredDockPanelSize("width", 380);
-  dockPanelHeight = readStoredDockPanelSize("height", 380);
   settingsRuntimeError = null;
   trackerRuntimeError = null;
   clearGenerationRequestPending();
@@ -322,19 +323,22 @@ function ensureDockPanel() {
   dockRootRef?.removeEventListener("click", handleClick);
   dockRootRef?.removeEventListener("change", handleChange);
   dockRootRef?.removeEventListener("input", handleInput);
-  cleanupDockResizeHandles();
   dockPanelHandle?.destroy();
   let panel: ReturnType<SpindleFrontendContext["ui"]["requestDockPanel"]>;
   try {
-    panel = ctx.ui.requestDockPanel({
+    const mobile = isMobileDockViewport();
+    const options: DockPanelOptionsWithGeometry = {
       edge: "right",
       title: "SceneMap",
-      size: isMobileDockViewport() ? dockPanelHeight : dockPanelWidth,
+      size: 380,
       minSize: 300,
       maxSize: 620,
       resizable: true,
       startCollapsed: false,
-    });
+      // Desktop width and mobile sheet height must not overwrite each other.
+      persistGeometry: mobile ? "tracker-mobile" : "tracker-desktop",
+    };
+    panel = ctx.ui.requestDockPanel(options);
   } catch (error) {
     dockPanelHandle = null;
     dockRootRef = null;
@@ -349,19 +353,15 @@ function ensureDockPanel() {
   dockRootRef.addEventListener("change", handleChange);
   dockRootRef.addEventListener("input", handleInput);
   renderDockPanel();
-  watchDockResizeHandle();
 }
 
 function destroyDockPanel() {
   dockRootRef?.removeEventListener("click", handleClick);
   dockRootRef?.removeEventListener("change", handleChange);
   dockRootRef?.removeEventListener("input", handleInput);
-  dockResizeObserver?.disconnect();
-  cleanupDockResizeHandles();
   dockPanelHandle?.destroy();
   dockRootRef = null;
   dockPanelHandle = null;
-  dockResizeObserver = null;
   dockPanelError = null;
 }
 
@@ -381,116 +381,8 @@ function syncTrackerPlacement() {
   else ensureDockPanel();
 }
 
-function watchDockResizeHandle() {
-  // The dock API exposes resizability but no resize-end callback or handle node.
-  // Discover Lumiverse's native handle so its size can be styled and persisted.
-  dockResizeObserver?.disconnect();
-  cleanupDockResizeHandles();
-  let observedHost: HTMLElement | null = null;
-
-  const decorate = () => {
-    const root = dockRootRef;
-    if (!root?.isConnected) return null;
-    const host = findDockPanelHost(root);
-    if (!host) return null;
-
-    for (let ancestor = root.parentElement; ancestor && ancestor !== document.body; ancestor = ancestor.parentElement) {
-      for (const child of ancestor.children) {
-        if (!(child instanceof HTMLElement) || child.contains(root)) continue;
-        const cursor = getComputedStyle(child).cursor;
-        if (cursor !== "ew-resize" && cursor !== "ns-resize") continue;
-
-        child.classList.add("scenemap-dock-resize-handle");
-        child.classList.toggle("scenemap-dock-resize-horizontal", cursor === "ew-resize");
-        child.classList.toggle("scenemap-dock-resize-vertical", cursor === "ns-resize");
-        if (!decoratedDockResizeHandles.has(child)) {
-          decoratedDockResizeHandles.add(child);
-          child.addEventListener("pointerup", handleNativeDockResizeEnd);
-        }
-        return host;
-      }
-    }
-    return host;
-  };
-
-  dockResizeObserver = new MutationObserver((records) => {
-    const root = dockRootRef;
-    if (root?.isConnected && records.every((record) => root.contains(record.target))) return;
-    const host = decorate();
-    if (host && host !== observedHost) {
-      observedHost = host;
-      dockResizeObserver?.disconnect();
-      dockResizeObserver?.observe(host, { childList: true, subtree: true });
-    }
-  });
-  dockResizeObserver.observe(document.documentElement, { childList: true, subtree: true });
-  const host = decorate();
-  if (host) {
-    observedHost = host;
-    dockResizeObserver.disconnect();
-    dockResizeObserver.observe(host, { childList: true, subtree: true });
-  }
-}
-
-function findDockPanelHost(element: HTMLElement): HTMLElement | null {
-  for (let ancestor = element.parentElement; ancestor && ancestor !== document.body; ancestor = ancestor.parentElement) {
-    if (getComputedStyle(ancestor).position === "fixed") return ancestor;
-  }
-  return null;
-}
-
-function handleNativeDockResizeEnd(event: PointerEvent) {
-  if (!(event.currentTarget instanceof HTMLElement)) return;
-  const handle = event.currentTarget;
-  const host = findDockPanelHost(handle);
-  if (!host) return;
-  const cursor = getComputedStyle(handle).cursor;
-  const rect = host.getBoundingClientRect();
-  const nextSize = cursor === "ns-resize" ? rect.height : rect.width;
-  const clampedSize = Math.max(300, Math.min(620, Math.round(nextSize)));
-  if (cursor === "ns-resize") {
-    dockPanelHeight = clampedSize;
-    storeDockPanelSize("height", clampedSize);
-  } else {
-    dockPanelWidth = clampedSize;
-    storeDockPanelSize("width", clampedSize);
-  }
-}
-
-function cleanupDockResizeHandles() {
-  for (const handle of decoratedDockResizeHandles) {
-    handle.removeEventListener("pointerup", handleNativeDockResizeEnd);
-    handle.classList.remove(
-      "scenemap-dock-resize-handle",
-      "scenemap-dock-resize-horizontal",
-      "scenemap-dock-resize-vertical",
-    );
-  }
-  decoratedDockResizeHandles.clear();
-}
-
 function isMobileDockViewport(): boolean {
   return typeof window !== "undefined" && window.matchMedia("(max-width: 600px)").matches;
-}
-
-function readStoredDockPanelSize(axis: "width" | "height", fallback: number): number {
-  try {
-    const stored = localStorage.getItem(`scenemap:dock-panel-${axis}`);
-    const legacy = axis === "width" ? localStorage.getItem("scenemap:dock-panel-size") : null;
-    const value = Number(stored ?? legacy);
-    if (Number.isFinite(value) && value >= 300 && value <= 620) return Math.round(value);
-  } catch {
-    // Storage can be unavailable in restricted browser contexts.
-  }
-  return fallback;
-}
-
-function storeDockPanelSize(axis: "width" | "height", size: number) {
-  try {
-    localStorage.setItem(`scenemap:dock-panel-${axis}`, String(size));
-  } catch {
-    // Resizing still works for the current session when storage is unavailable.
-  }
 }
 
 function send(payload: Record<string, unknown>) {
@@ -3607,13 +3499,6 @@ function refreshSvg(): string {
 const styles = `
 .scenemap-lv { height: 100%; min-height: 0; display: flex; flex-direction: column; overflow: hidden; color: var(--lumiverse-text); }
 .scenemap-drawer-root { height: auto; min-height: 100%; overflow: visible; }
-.scenemap-dock-resize-handle { background: var(--lumiverse-primary, var(--lumiverse-accent, #8ab4f8)) !important; opacity: .45; z-index: 4 !important; transition: opacity .15s ease; }
-.scenemap-dock-resize-handle:hover { opacity: .9; }
-.scenemap-dock-resize-horizontal { width: 6px !important; }
-.scenemap-dock-resize-vertical { height: 6px !important; }
-@media (max-width: 600px) {
-  .scenemap-dock-resize-horizontal { width: auto !important; height: 6px !important; }
-}
 .scenemap-shell { flex: 1 1 auto; display: flex; flex-direction: column; gap: 12px; padding: 14px; min-height: 0; box-sizing: border-box; overflow: hidden; }
 .scenemap-header { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 8px; }
 .scenemap-header h2 { margin: 0; font-size: 18px; font-weight: 700; }

@@ -4098,10 +4098,6 @@ var topToolbarTapTimer = null;
 var topToolbarSuppressClickUntil = Number.NEGATIVE_INFINITY;
 var tabHandle = null;
 var dockPanelHandle = null;
-var dockResizeObserver = null;
-var dockPanelWidth = 380;
-var dockPanelHeight = 380;
-var decoratedDockResizeHandles = new Set;
 var dockPanelError = null;
 var settingsRuntimeError = null;
 var trackerRuntimeError = null;
@@ -4143,8 +4139,6 @@ function setup(ctx) {
   if (drawerScrollRestoreFrame !== null)
     cancelAnimationFrame(drawerScrollRestoreFrame);
   drawerScrollRestoreFrame = null;
-  dockPanelWidth = readStoredDockPanelSize("width", 380);
-  dockPanelHeight = readStoredDockPanelSize("height", 380);
   settingsRuntimeError = null;
   trackerRuntimeError = null;
   clearGenerationRequestPending();
@@ -4307,19 +4301,21 @@ function ensureDockPanel() {
   dockRootRef?.removeEventListener("click", handleClick);
   dockRootRef?.removeEventListener("change", handleChange);
   dockRootRef?.removeEventListener("input", handleInput);
-  cleanupDockResizeHandles();
   dockPanelHandle?.destroy();
   let panel;
   try {
-    panel = ctx.ui.requestDockPanel({
+    const mobile = isMobileDockViewport();
+    const options = {
       edge: "right",
       title: "SceneMap",
-      size: isMobileDockViewport() ? dockPanelHeight : dockPanelWidth,
+      size: 380,
       minSize: 300,
       maxSize: 620,
       resizable: true,
-      startCollapsed: false
-    });
+      startCollapsed: false,
+      persistGeometry: mobile ? "tracker-mobile" : "tracker-desktop"
+    };
+    panel = ctx.ui.requestDockPanel(options);
   } catch (error) {
     dockPanelHandle = null;
     dockRootRef = null;
@@ -4334,18 +4330,14 @@ function ensureDockPanel() {
   dockRootRef.addEventListener("change", handleChange);
   dockRootRef.addEventListener("input", handleInput);
   renderDockPanel();
-  watchDockResizeHandle();
 }
 function destroyDockPanel() {
   dockRootRef?.removeEventListener("click", handleClick);
   dockRootRef?.removeEventListener("change", handleChange);
   dockRootRef?.removeEventListener("input", handleInput);
-  dockResizeObserver?.disconnect();
-  cleanupDockResizeHandles();
   dockPanelHandle?.destroy();
   dockRootRef = null;
   dockPanelHandle = null;
-  dockResizeObserver = null;
   dockPanelError = null;
 }
 function syncTrackerPlacement() {
@@ -4363,105 +4355,8 @@ function syncTrackerPlacement() {
   else
     ensureDockPanel();
 }
-function watchDockResizeHandle() {
-  dockResizeObserver?.disconnect();
-  cleanupDockResizeHandles();
-  let observedHost = null;
-  const decorate = () => {
-    const root = dockRootRef;
-    if (!root?.isConnected)
-      return null;
-    const host2 = findDockPanelHost(root);
-    if (!host2)
-      return null;
-    for (let ancestor = root.parentElement;ancestor && ancestor !== document.body; ancestor = ancestor.parentElement) {
-      for (const child of ancestor.children) {
-        if (!(child instanceof HTMLElement) || child.contains(root))
-          continue;
-        const cursor = getComputedStyle(child).cursor;
-        if (cursor !== "ew-resize" && cursor !== "ns-resize")
-          continue;
-        child.classList.add("scenemap-dock-resize-handle");
-        child.classList.toggle("scenemap-dock-resize-horizontal", cursor === "ew-resize");
-        child.classList.toggle("scenemap-dock-resize-vertical", cursor === "ns-resize");
-        if (!decoratedDockResizeHandles.has(child)) {
-          decoratedDockResizeHandles.add(child);
-          child.addEventListener("pointerup", handleNativeDockResizeEnd);
-        }
-        return host2;
-      }
-    }
-    return host2;
-  };
-  dockResizeObserver = new MutationObserver((records) => {
-    const root = dockRootRef;
-    if (root?.isConnected && records.every((record) => root.contains(record.target)))
-      return;
-    const host2 = decorate();
-    if (host2 && host2 !== observedHost) {
-      observedHost = host2;
-      dockResizeObserver?.disconnect();
-      dockResizeObserver?.observe(host2, { childList: true, subtree: true });
-    }
-  });
-  dockResizeObserver.observe(document.documentElement, { childList: true, subtree: true });
-  const host = decorate();
-  if (host) {
-    observedHost = host;
-    dockResizeObserver.disconnect();
-    dockResizeObserver.observe(host, { childList: true, subtree: true });
-  }
-}
-function findDockPanelHost(element) {
-  for (let ancestor = element.parentElement;ancestor && ancestor !== document.body; ancestor = ancestor.parentElement) {
-    if (getComputedStyle(ancestor).position === "fixed")
-      return ancestor;
-  }
-  return null;
-}
-function handleNativeDockResizeEnd(event) {
-  if (!(event.currentTarget instanceof HTMLElement))
-    return;
-  const handle = event.currentTarget;
-  const host = findDockPanelHost(handle);
-  if (!host)
-    return;
-  const cursor = getComputedStyle(handle).cursor;
-  const rect = host.getBoundingClientRect();
-  const nextSize = cursor === "ns-resize" ? rect.height : rect.width;
-  const clampedSize = Math.max(300, Math.min(620, Math.round(nextSize)));
-  if (cursor === "ns-resize") {
-    dockPanelHeight = clampedSize;
-    storeDockPanelSize("height", clampedSize);
-  } else {
-    dockPanelWidth = clampedSize;
-    storeDockPanelSize("width", clampedSize);
-  }
-}
-function cleanupDockResizeHandles() {
-  for (const handle of decoratedDockResizeHandles) {
-    handle.removeEventListener("pointerup", handleNativeDockResizeEnd);
-    handle.classList.remove("scenemap-dock-resize-handle", "scenemap-dock-resize-horizontal", "scenemap-dock-resize-vertical");
-  }
-  decoratedDockResizeHandles.clear();
-}
 function isMobileDockViewport() {
   return typeof window !== "undefined" && window.matchMedia("(max-width: 600px)").matches;
-}
-function readStoredDockPanelSize(axis, fallback) {
-  try {
-    const stored = localStorage.getItem(`scenemap:dock-panel-${axis}`);
-    const legacy = axis === "width" ? localStorage.getItem("scenemap:dock-panel-size") : null;
-    const value = Number(stored ?? legacy);
-    if (Number.isFinite(value) && value >= 300 && value <= 620)
-      return Math.round(value);
-  } catch {}
-  return fallback;
-}
-function storeDockPanelSize(axis, size) {
-  try {
-    localStorage.setItem(`scenemap:dock-panel-${axis}`, String(size));
-  } catch {}
 }
 function send(payload) {
   ctxRef?.sendToBackend(payload);
@@ -7264,13 +7159,6 @@ function refreshSvg() {
 var styles = `
 .scenemap-lv { height: 100%; min-height: 0; display: flex; flex-direction: column; overflow: hidden; color: var(--lumiverse-text); }
 .scenemap-drawer-root { height: auto; min-height: 100%; overflow: visible; }
-.scenemap-dock-resize-handle { background: var(--lumiverse-primary, var(--lumiverse-accent, #8ab4f8)) !important; opacity: .45; z-index: 4 !important; transition: opacity .15s ease; }
-.scenemap-dock-resize-handle:hover { opacity: .9; }
-.scenemap-dock-resize-horizontal { width: 6px !important; }
-.scenemap-dock-resize-vertical { height: 6px !important; }
-@media (max-width: 600px) {
-  .scenemap-dock-resize-horizontal { width: auto !important; height: 6px !important; }
-}
 .scenemap-shell { flex: 1 1 auto; display: flex; flex-direction: column; gap: 12px; padding: 14px; min-height: 0; box-sizing: border-box; overflow: hidden; }
 .scenemap-header { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 8px; }
 .scenemap-header h2 { margin: 0; font-size: 18px; font-weight: 700; }
