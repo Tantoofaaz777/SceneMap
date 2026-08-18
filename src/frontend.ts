@@ -267,15 +267,15 @@ export function setup(ctx: SpindleFrontendContext) {
       handleTextEditorResult(payload);
     }
   });
+  // GENERATION_ENDED is intentionally absent: the backend subscription owns
+  // auto-generation and always pushes the resulting state. Listening here too
+  // would enqueue a duplicate state build for every normal chat response.
   const offEvents = [
     ctx.events.on("CHAT_SWITCHED", () => requestState()),
     ctx.events.on("MESSAGE_EDITED", () => requestState()),
     ctx.events.on("MESSAGE_DELETED", () => requestState()),
     ctx.events.on("MESSAGE_SWIPED", () => requestState()),
     ctx.events.on("SWIPE_EDITED", () => requestState()),
-    // Auto-generation is handled by the backend event subscription, which
-    // receives the triggering userId directly from Spindle.
-    ctx.events.on("GENERATION_ENDED", () => requestState()),
   ];
 
   rootRef.addEventListener("click", handleClick);

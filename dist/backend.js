@@ -2419,6 +2419,7 @@ var worldInfoActivations = new WorldInfoActivationCache;
 var statePushQueue = new KeyedAsyncQueue;
 var settingsSaveQueue = new KeyedAsyncQueue;
 var STATE_BUILD_TIMEOUT_MS = 1e4;
+var STATE_BUILD_TIMEOUT_MESSAGE = "SceneMap timed out while refreshing its state.";
 var macroLayoutsByChatId = new Map;
 var alternateCharacterFields = ["description", "personality", "scenario"];
 async function loadSettings(userId) {
@@ -2801,8 +2802,11 @@ async function buildGenerationPromptMessages(systemTemplate, userTemplate, value
   return messages;
 }
 async function buildState(userId) {
-  const settings = await loadSettings(userId);
-  const { chat, messages } = await getActiveContext(userId);
+  const [settings, { chat, messages }, connections] = await Promise.all([
+    loadSettings(userId),
+    getActiveContext(userId),
+    listConnections(userId)
+  ]);
   const effectivePresetKey = getChatPresetKey(chat, settings);
   const latest = getLatestTrackerEntry(messages);
   const effectivePreset = settings.schemaPresets[effectivePresetKey] ?? settings.schemaPresets[settings.schemaPreset] ?? settings.schemaPresets.default;
@@ -2818,7 +2822,6 @@ async function buildState(userId) {
       userId
     });
   }
-  const connections = await listConnections(userId);
   const activeGeneration = activeGenerations.get(userId);
   return {
     settings,
@@ -2836,7 +2839,15 @@ async function buildState(userId) {
 }
 function pushState(userId, response = {}) {
   return statePushQueue.enqueue(userId, async () => {
-    const state = await withTimeout(buildState(userId), STATE_BUILD_TIMEOUT_MS, "SceneMap timed out while refreshing its state.");
+    let state;
+    try {
+      state = await withTimeout(buildState(userId), STATE_BUILD_TIMEOUT_MS, STATE_BUILD_TIMEOUT_MESSAGE);
+    } catch (error) {
+      if (error.message !== STATE_BUILD_TIMEOUT_MESSAGE)
+        throw error;
+      spindle.log.warn("SceneMap state refresh timed out; retrying once.");
+      state = await withTimeout(buildState(userId), STATE_BUILD_TIMEOUT_MS, STATE_BUILD_TIMEOUT_MESSAGE);
+    }
     if (state.chatId) {
       const preset = state.settings.schemaPresets[state.effectivePresetKey] ?? state.settings.schemaPresets[state.settings.schemaPreset] ?? state.settings.schemaPresets.default;
       macroLayoutsByChatId.set(state.chatId, {

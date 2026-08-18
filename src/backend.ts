@@ -107,6 +107,7 @@ const worldInfoActivations = new WorldInfoActivationCache();
 const statePushQueue = new KeyedAsyncQueue();
 const settingsSaveQueue = new KeyedAsyncQueue();
 const STATE_BUILD_TIMEOUT_MS = 10_000;
+const STATE_BUILD_TIMEOUT_MESSAGE = "SceneMap timed out while refreshing its state.";
 // Pull macros do not carry the frontend state, so cache only the layout metadata
 // needed to format the latest tracker for each chat.
 const macroLayoutsByChatId = new Map<string, {
@@ -583,8 +584,14 @@ async function buildGenerationPromptMessages(
 }
 
 async function buildState(userId: string): Promise<SceneMapState> {
-  const settings = await loadSettings(userId);
-  const { chat, messages } = await getActiveContext(userId);
+  // These reads are independent. Running them together keeps an otherwise
+  // healthy refresh below the timeout when Lumiverse is busy finishing a chat
+  // generation and several Spindle services respond a little more slowly.
+  const [settings, { chat, messages }, connections] = await Promise.all([
+    loadSettings(userId),
+    getActiveContext(userId),
+    listConnections(userId),
+  ]);
   const effectivePresetKey = getChatPresetKey(chat, settings);
   const latest = getLatestTrackerEntry(messages);
   const effectivePreset = settings.schemaPresets[effectivePresetKey]
@@ -603,7 +610,6 @@ async function buildState(userId: string): Promise<SceneMapState> {
       userId,
     });
   }
-  const connections = await listConnections(userId);
   // Read generation state after every slow RPC. Otherwise an old state build
   // can publish "active" after the generation has already completed.
   const activeGeneration = activeGenerations.get(userId);
@@ -626,11 +632,25 @@ function pushState(userId: string, response: Record<string, unknown> = {}): Prom
   // Queue the complete build+send operation, not just sendToFrontend, otherwise
   // an older slow build could arrive after a newer state snapshot.
   return statePushQueue.enqueue(userId, async () => {
-    const state = await withTimeout(
-      buildState(userId),
-      STATE_BUILD_TIMEOUT_MS,
-      "SceneMap timed out while refreshing its state.",
-    );
+    let state: SceneMapState;
+    try {
+      state = await withTimeout(
+        buildState(userId),
+        STATE_BUILD_TIMEOUT_MS,
+        STATE_BUILD_TIMEOUT_MESSAGE,
+      );
+    } catch (error) {
+      if ((error as Error).message !== STATE_BUILD_TIMEOUT_MESSAGE) throw error;
+      // A state read can briefly contend with the host's generation-finished
+      // work. One fresh attempt avoids surfacing that transient congestion as
+      // a tracker failure while preserving a finite upper bound for the queue.
+      spindle.log.warn("SceneMap state refresh timed out; retrying once.");
+      state = await withTimeout(
+        buildState(userId),
+        STATE_BUILD_TIMEOUT_MS,
+        STATE_BUILD_TIMEOUT_MESSAGE,
+      );
+    }
     if (state.chatId) {
       const preset = state.settings.schemaPresets[state.effectivePresetKey]
         ?? state.settings.schemaPresets[state.settings.schemaPreset]
