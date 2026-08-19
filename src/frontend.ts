@@ -29,6 +29,7 @@ import {
   type RegeneratableField,
 } from "./partial-regeneration";
 import { getTopToolbarStatus } from "./top-toolbar-status";
+import { StateRefreshGate } from "./state-refresh-gate";
 import {
   appendTrackerArrayItem,
   cloneTrackerEditValue,
@@ -78,6 +79,7 @@ let editorRequestSeq = 0;
 let trackerEditRequestSeq = 0;
 let settingsSaveRequestSeq = 0;
 let automaticSaveRequestSeq = 0;
+let stateRequestSeq = 0;
 let drawerSelectHandles: SpindleSelectHandle[] = [];
 let automaticSaveTimer: ReturnType<typeof setTimeout> | null = null;
 let drawerScrollRestoreFrame: number | null = null;
@@ -150,7 +152,9 @@ type PendingTextEditor = {
 const pendingTextEditors = new Map<string, PendingTextEditor>();
 const settingsDraft = new SettingsDraftTracker();
 const automaticSettingsDraft = new AutomaticSettingsDraftTracker<SceneMapSettings>();
+const stateRefreshGate = new StateRefreshGate();
 const GENERATION_REQUEST_TIMEOUT_MS = 10_000;
+const STATE_LOAD_ERROR = "SceneMap could not load its state. It will retry after the next chat update.";
 const TOP_TOOLBAR_DOUBLE_CLICK_MS = 280;
 const TOP_TOOLBAR_LONG_PRESS_MS = 500;
 const TOP_TOOLBAR_PRESS_MOVE_TOLERANCE_PX = 10;
@@ -173,6 +177,7 @@ export function setup(ctx: SpindleFrontendContext) {
   drawerScrollRestoreFrame = null;
   settingsRuntimeError = null;
   trackerRuntimeError = null;
+  stateRefreshGate.reset();
   clearGenerationRequestPending();
   ctxRef = ctx;
   const removeStyle = ctx.dom.addStyle(styles);
@@ -213,12 +218,14 @@ export function setup(ctx: SpindleFrontendContext) {
 
   const offBackend = ctx.onBackendMessage((payload: any) => {
     if (payload?.type === "state") {
+      finishStateRequest(payload.stateRequestId);
       // Full state snapshots can arrive while a native select is open or text is
       // focused. Reconcile drafts first, then avoid rebuilding an unchanged form.
       const preserveActiveSettings = settingsSurfaceHasActiveInteraction();
       const previousState = state;
       const incomingState = payload.state as SceneMapState;
       hasReceivedInitialState = true;
+      if (trackerRuntimeError === STATE_LOAD_ERROR) trackerRuntimeError = null;
       reconcileTrackerEditSession(incomingState, payload);
       if (!settingsDraft.initialized) settingsDraft.initialize(presetSettingsFingerprint(incomingState.settings));
       if (typeof payload.automaticSettingsSaveRequestId === "string") {
@@ -243,6 +250,15 @@ export function setup(ctx: SpindleFrontendContext) {
       render({
         preserveSettingsSurface: preserveActiveSettings && settingsSurfaceStructureMatches(previousState, nextState),
       });
+      return;
+    }
+    if (payload?.type === "state_refresh_error") {
+      const matchedRequest = finishStateRequest(payload.requestId);
+      console.warn(`[SceneMap] State refresh failed: ${String(payload.message ?? "Unknown error")}`);
+      if (matchedRequest && !hasReceivedInitialState) {
+        trackerRuntimeError = STATE_LOAD_ERROR;
+        renderTrackerSurfaces();
+      }
       return;
     }
     if (payload?.type === "generation_status") {
@@ -340,6 +356,7 @@ export function setup(ctx: SpindleFrontendContext) {
     clearGenerationRequestPending();
     settingsRuntimeError = null;
     trackerRuntimeError = null;
+    stateRefreshGate.reset();
     trackerEditSession = null;
     settingsDraft.reset();
     presetEditorDrafts.clear();
@@ -424,7 +441,15 @@ function send(payload: Record<string, unknown>) {
 }
 
 function requestState() {
-  send({ type: "get_state" });
+  const requestId = `state-${++stateRequestSeq}`;
+  if (!stateRefreshGate.begin(requestId)) return;
+  send({ type: "get_state", requestId });
+}
+
+function finishStateRequest(value: unknown): boolean {
+  const completion = stateRefreshGate.complete(value);
+  if (completion.rerun) queueMicrotask(requestState);
+  return completion.matched;
 }
 
 function clearGenerationRequestPending() {

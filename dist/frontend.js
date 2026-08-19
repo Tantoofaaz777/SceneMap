@@ -3874,6 +3874,33 @@ function getTopToolbarStatus(state, requestPending = false) {
   return { tone: "success", text: "SceneMap is updated" };
 }
 
+// src/state-refresh-gate.ts
+class StateRefreshGate {
+  activeRequestId = null;
+  rerunRequested = false;
+  begin(requestId) {
+    if (this.activeRequestId) {
+      this.rerunRequested = true;
+      return false;
+    }
+    this.activeRequestId = requestId;
+    return true;
+  }
+  complete(value) {
+    if (typeof value !== "string" || value !== this.activeRequestId) {
+      return { matched: false, rerun: false };
+    }
+    this.activeRequestId = null;
+    const rerun = this.rerunRequested;
+    this.rerunRequested = false;
+    return { matched: true, rerun };
+  }
+  reset() {
+    this.activeRequestId = null;
+    this.rerunRequested = false;
+  }
+}
+
 // src/tracker-inline-edit.ts
 var blockedPathKeys = new Set(["__proto__", "prototype", "constructor"]);
 function getRecord2(value) {
@@ -4106,6 +4133,7 @@ var editorRequestSeq = 0;
 var trackerEditRequestSeq = 0;
 var settingsSaveRequestSeq = 0;
 var automaticSaveRequestSeq = 0;
+var stateRequestSeq = 0;
 var drawerSelectHandles = [];
 var automaticSaveTimer = null;
 var drawerScrollRestoreFrame = null;
@@ -4119,7 +4147,9 @@ var presetEditorDrafts = new Map;
 var pendingTextEditors = new Map;
 var settingsDraft = new SettingsDraftTracker;
 var automaticSettingsDraft = new AutomaticSettingsDraftTracker;
+var stateRefreshGate = new StateRefreshGate;
 var GENERATION_REQUEST_TIMEOUT_MS = 1e4;
+var STATE_LOAD_ERROR = "SceneMap could not load its state. It will retry after the next chat update.";
 var TOP_TOOLBAR_DOUBLE_CLICK_MS = 280;
 var TOP_TOOLBAR_LONG_PRESS_MS = 500;
 var TOP_TOOLBAR_PRESS_MOVE_TOLERANCE_PX = 10;
@@ -4142,6 +4172,7 @@ function setup(ctx) {
   drawerScrollRestoreFrame = null;
   settingsRuntimeError = null;
   trackerRuntimeError = null;
+  stateRefreshGate.reset();
   clearGenerationRequestPending();
   ctxRef = ctx;
   const removeStyle = ctx.dom.addStyle(styles);
@@ -4179,10 +4210,13 @@ function setup(ctx) {
   render();
   const offBackend = ctx.onBackendMessage((payload) => {
     if (payload?.type === "state") {
+      finishStateRequest(payload.stateRequestId);
       const preserveActiveSettings = settingsSurfaceHasActiveInteraction();
       const previousState = state;
       const incomingState = payload.state;
       hasReceivedInitialState = true;
+      if (trackerRuntimeError === STATE_LOAD_ERROR)
+        trackerRuntimeError = null;
       reconcileTrackerEditSession(incomingState, payload);
       if (!settingsDraft.initialized)
         settingsDraft.initialize(presetSettingsFingerprint(incomingState.settings));
@@ -4209,6 +4243,15 @@ function setup(ctx) {
       render({
         preserveSettingsSurface: preserveActiveSettings && settingsSurfaceStructureMatches(previousState, nextState)
       });
+      return;
+    }
+    if (payload?.type === "state_refresh_error") {
+      const matchedRequest = finishStateRequest(payload.requestId);
+      console.warn(`[SceneMap] State refresh failed: ${String(payload.message ?? "Unknown error")}`);
+      if (matchedRequest && !hasReceivedInitialState) {
+        trackerRuntimeError = STATE_LOAD_ERROR;
+        renderTrackerSurfaces();
+      }
       return;
     }
     if (payload?.type === "generation_status") {
@@ -4304,6 +4347,7 @@ function setup(ctx) {
     clearGenerationRequestPending();
     settingsRuntimeError = null;
     trackerRuntimeError = null;
+    stateRefreshGate.reset();
     trackerEditSession = null;
     settingsDraft.reset();
     presetEditorDrafts.clear();
@@ -4381,7 +4425,16 @@ function send(payload) {
   ctxRef?.sendToBackend(payload);
 }
 function requestState() {
-  send({ type: "get_state" });
+  const requestId = `state-${++stateRequestSeq}`;
+  if (!stateRefreshGate.begin(requestId))
+    return;
+  send({ type: "get_state", requestId });
+}
+function finishStateRequest(value) {
+  const completion = stateRefreshGate.complete(value);
+  if (completion.rerun)
+    queueMicrotask(requestState);
+  return completion.matched;
 }
 function clearGenerationRequestPending() {
   isGenerationRequestPending = false;

@@ -108,6 +108,9 @@ const statePushQueue = new KeyedAsyncQueue();
 const settingsSaveQueue = new KeyedAsyncQueue();
 const STATE_BUILD_TIMEOUT_MS = 10_000;
 const STATE_BUILD_TIMEOUT_MESSAGE = "SceneMap timed out while refreshing its state.";
+const OPTIONAL_STATE_READ_TIMEOUT_MS = 2_500;
+const stateConnectionsByUser = new Map<string, ConnectionSummary[]>();
+const stateConnectionReadsByUser = new Map<string, Promise<ConnectionSummary[]>>();
 // Pull macros do not carry the frontend state, so cache only the layout metadata
 // needed to format the latest tracker for each chat.
 const macroLayoutsByChatId = new Map<string, {
@@ -341,8 +344,34 @@ async function listConnections(userId?: string): Promise<ConnectionSummary[]> {
       model: conn.model,
       is_default: conn.is_default,
     }));
-  } catch {
-    return [];
+  } catch (error) {
+    spindle.log.warn(`SceneMap could not refresh connections: ${(error as Error).message}`);
+    throw error;
+  }
+}
+
+async function getStateConnections(userId: string): Promise<ConnectionSummary[]> {
+  let read = stateConnectionReadsByUser.get(userId);
+  if (!read) {
+    read = listConnections(userId).then((connections) => {
+      stateConnectionsByUser.set(userId, connections);
+      return connections;
+    });
+    stateConnectionReadsByUser.set(userId, read);
+    const clearRead = () => {
+      if (stateConnectionReadsByUser.get(userId) === read) stateConnectionReadsByUser.delete(userId);
+    };
+    void read.then(clearRead, clearRead);
+  }
+  try {
+    return await withTimeout(
+      read,
+      OPTIONAL_STATE_READ_TIMEOUT_MS,
+      "SceneMap connection refresh timed out.",
+    );
+  } catch (error) {
+    spindle.log.warn(`SceneMap kept its previous connection list: ${(error as Error).message}`);
+    return stateConnectionsByUser.get(userId) ?? [];
   }
 }
 
@@ -584,14 +613,11 @@ async function buildGenerationPromptMessages(
 }
 
 async function buildState(userId: string): Promise<SceneMapState> {
-  // These reads are independent. Running them together keeps an otherwise
-  // healthy refresh below the timeout when Lumiverse is busy finishing a chat
-  // generation and several Spindle services respond a little more slowly.
-  const [settings, { chat, messages }, connections] = await Promise.all([
-    loadSettings(userId),
-    getActiveContext(userId),
-    listConnections(userId),
-  ]);
+  // Keep host RPCs sequential. Some Lumiverse updates emit several chat events
+  // together, and fanning independent worker requests out here made a congested
+  // host less predictable rather than faster.
+  const settings = await loadSettings(userId);
+  const { chat, messages } = await getActiveContext(userId);
   const effectivePresetKey = getChatPresetKey(chat, settings);
   const latest = getLatestTrackerEntry(messages);
   const effectivePreset = settings.schemaPresets[effectivePresetKey]
@@ -604,12 +630,24 @@ async function buildState(userId: string): Promise<SceneMapState> {
     const trackerMessage = messages.find((message) => message.id === latest.messageId);
     // Resolve macros only in the transient display copy. Stored JSON remains the
     // source of truth and can be resolved again under the correct chat context.
-    latest.displayData = await resolveTrackerDisplayData(latest.data, {
-      chatId: chat.id,
-      characterId: resolveMessageCharacterId(chat, trackerMessage),
-      userId,
-    });
+    try {
+      latest.displayData = await withTimeout(
+        resolveTrackerDisplayData(latest.data, {
+          chatId: chat.id,
+          characterId: resolveMessageCharacterId(chat, trackerMessage),
+          userId,
+        }),
+        OPTIONAL_STATE_READ_TIMEOUT_MS,
+        "SceneMap display macro refresh timed out.",
+      );
+    } catch (error) {
+      // Display macro expansion is cosmetic. Raw stored tracker data is always
+      // safer than failing the complete state refresh or hiding the tracker.
+      spindle.log.warn(`SceneMap displayed raw tracker values: ${(error as Error).message}`);
+      latest.displayData = latest.data;
+    }
   }
+  const connections = await getStateConnections(userId);
   // Read generation state after every slow RPC. Otherwise an old state build
   // can publish "active" after the generation has already completed.
   const activeGeneration = activeGenerations.get(userId);
@@ -1193,7 +1231,7 @@ function cancelTrackerGeneration(userId: string): void {
 async function maybeAutoGenerateTracker(messageId: string | null | undefined, userId: string) {
   const settings = await loadSettings(userId);
   if (!settings.autoGenerateAiTrackers) {
-    await pushState(userId);
+    pushStateInBackground(userId);
     return;
   }
 
@@ -1201,16 +1239,16 @@ async function maybeAutoGenerateTracker(messageId: string | null | undefined, us
   const { messages } = await getActiveContext(userId);
   const target = findLatestAssistantMessage(messages);
   if (!target || target.id !== messageId) {
-    await pushState(userId);
+    pushStateInBackground(userId);
     return;
   }
   if (getMessageTracker(target)) {
-    await pushState(userId);
+    pushStateInBackground(userId);
     return;
   }
 
   if (getActiveGenerationMessageId(userId)) {
-    await pushState(userId);
+    pushStateInBackground(userId);
     return;
   }
 
@@ -1219,7 +1257,7 @@ async function maybeAutoGenerateTracker(messageId: string | null | undefined, us
   if (messagesDue >= interval) {
     await generateTracker(userId, target.id);
   } else {
-    await pushState(userId);
+    pushStateInBackground(userId);
   }
 }
 
@@ -1320,7 +1358,9 @@ spindle.onFrontendMessage(async (payload: any, userId?: string) => {
     if (!userId) throw new Error("SceneMap did not receive a user context from Lumiverse.");
     switch (payload?.type) {
       case "get_state":
-        await pushState(userId);
+        await pushState(userId, {
+          stateRequestId: typeof payload.requestId === "string" ? payload.requestId : "",
+        });
         break;
       case "save_preset_settings":
         await settingsSaveQueue.enqueue(userId, () => savePresetSettings(payload.settings, userId));
@@ -1384,11 +1424,16 @@ spindle.onFrontendMessage(async (payload: any, userId?: string) => {
     }
   } catch (error) {
     const isGenerationRequest = payload?.type === "generate_tracker" || payload?.type === "regenerate_fields";
+    const isStateRefreshRequest = payload?.type === "get_state";
     spindle.sendToFrontend({
-      type: "error",
+      type: isStateRefreshRequest ? "state_refresh_error" : "error",
       message: (error as Error).message,
       requestId: typeof payload?.requestId === "string" ? payload.requestId : undefined,
     }, userId);
+    if (isStateRefreshRequest) {
+      spindle.log.warn(`SceneMap frontend state request failed: ${(error as Error).message}`);
+      return;
+    }
     spindle.toast.error((error as Error).message, {
       title: isGenerationRequest ? "SceneMap generation failed" : "SceneMap",
       duration: isGenerationRequest ? 10000 : 9000,

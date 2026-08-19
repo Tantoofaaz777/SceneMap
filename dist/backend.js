@@ -2420,6 +2420,9 @@ var statePushQueue = new KeyedAsyncQueue;
 var settingsSaveQueue = new KeyedAsyncQueue;
 var STATE_BUILD_TIMEOUT_MS = 1e4;
 var STATE_BUILD_TIMEOUT_MESSAGE = "SceneMap timed out while refreshing its state.";
+var OPTIONAL_STATE_READ_TIMEOUT_MS = 2500;
+var stateConnectionsByUser = new Map;
+var stateConnectionReadsByUser = new Map;
 var macroLayoutsByChatId = new Map;
 var alternateCharacterFields = ["description", "personality", "scenario"];
 async function loadSettings(userId) {
@@ -2596,8 +2599,30 @@ async function listConnections(userId) {
       model: conn.model,
       is_default: conn.is_default
     }));
-  } catch {
-    return [];
+  } catch (error) {
+    spindle.log.warn(`SceneMap could not refresh connections: ${error.message}`);
+    throw error;
+  }
+}
+async function getStateConnections(userId) {
+  let read = stateConnectionReadsByUser.get(userId);
+  if (!read) {
+    read = listConnections(userId).then((connections) => {
+      stateConnectionsByUser.set(userId, connections);
+      return connections;
+    });
+    stateConnectionReadsByUser.set(userId, read);
+    const clearRead = () => {
+      if (stateConnectionReadsByUser.get(userId) === read)
+        stateConnectionReadsByUser.delete(userId);
+    };
+    read.then(clearRead, clearRead);
+  }
+  try {
+    return await withTimeout(read, OPTIONAL_STATE_READ_TIMEOUT_MS, "SceneMap connection refresh timed out.");
+  } catch (error) {
+    spindle.log.warn(`SceneMap kept its previous connection list: ${error.message}`);
+    return stateConnectionsByUser.get(userId) ?? [];
   }
 }
 async function getActiveContext(userId) {
@@ -2802,11 +2827,8 @@ async function buildGenerationPromptMessages(systemTemplate, userTemplate, value
   return messages;
 }
 async function buildState(userId) {
-  const [settings, { chat, messages }, connections] = await Promise.all([
-    loadSettings(userId),
-    getActiveContext(userId),
-    listConnections(userId)
-  ]);
+  const settings = await loadSettings(userId);
+  const { chat, messages } = await getActiveContext(userId);
   const effectivePresetKey = getChatPresetKey(chat, settings);
   const latest = getLatestTrackerEntry(messages);
   const effectivePreset = settings.schemaPresets[effectivePresetKey] ?? settings.schemaPresets[settings.schemaPreset] ?? settings.schemaPresets.default;
@@ -2816,12 +2838,18 @@ async function buildState(userId) {
   const activeMessage = findLatestAssistantMessage(messages);
   if (latest && chat) {
     const trackerMessage = messages.find((message) => message.id === latest.messageId);
-    latest.displayData = await resolveTrackerDisplayData(latest.data, {
-      chatId: chat.id,
-      characterId: resolveMessageCharacterId(chat, trackerMessage),
-      userId
-    });
+    try {
+      latest.displayData = await withTimeout(resolveTrackerDisplayData(latest.data, {
+        chatId: chat.id,
+        characterId: resolveMessageCharacterId(chat, trackerMessage),
+        userId
+      }), OPTIONAL_STATE_READ_TIMEOUT_MS, "SceneMap display macro refresh timed out.");
+    } catch (error) {
+      spindle.log.warn(`SceneMap displayed raw tracker values: ${error.message}`);
+      latest.displayData = latest.data;
+    }
   }
+  const connections = await getStateConnections(userId);
   const activeGeneration = activeGenerations.get(userId);
   return {
     settings,
@@ -3304,22 +3332,22 @@ function cancelTrackerGeneration(userId) {
 async function maybeAutoGenerateTracker(messageId, userId) {
   const settings = await loadSettings(userId);
   if (!settings.autoGenerateAiTrackers) {
-    await pushState(userId);
+    pushStateInBackground(userId);
     return;
   }
   const interval = Math.max(1, Math.floor(settings.autoGenerateInterval || 1));
   const { messages } = await getActiveContext(userId);
   const target = findLatestAssistantMessage(messages);
   if (!target || target.id !== messageId) {
-    await pushState(userId);
+    pushStateInBackground(userId);
     return;
   }
   if (getMessageTracker(target)) {
-    await pushState(userId);
+    pushStateInBackground(userId);
     return;
   }
   if (getActiveGenerationMessageId(userId)) {
-    await pushState(userId);
+    pushStateInBackground(userId);
     return;
   }
   const latest = getLatestTrackerEntry(messages);
@@ -3327,7 +3355,7 @@ async function maybeAutoGenerateTracker(messageId, userId) {
   if (messagesDue >= interval) {
     await generateTracker(userId, target.id);
   } else {
-    await pushState(userId);
+    pushStateInBackground(userId);
   }
 }
 async function editTracker(chatId, messageId, swipeId, data, expectedData, requestId, userId) {
@@ -3416,7 +3444,9 @@ spindle.onFrontendMessage(async (payload, userId) => {
       throw new Error("SceneMap did not receive a user context from Lumiverse.");
     switch (payload?.type) {
       case "get_state":
-        await pushState(userId);
+        await pushState(userId, {
+          stateRequestId: typeof payload.requestId === "string" ? payload.requestId : ""
+        });
         break;
       case "save_preset_settings":
         await settingsSaveQueue.enqueue(userId, () => savePresetSettings(payload.settings, userId));
@@ -3473,11 +3503,16 @@ spindle.onFrontendMessage(async (payload, userId) => {
     }
   } catch (error) {
     const isGenerationRequest = payload?.type === "generate_tracker" || payload?.type === "regenerate_fields";
+    const isStateRefreshRequest = payload?.type === "get_state";
     spindle.sendToFrontend({
-      type: "error",
+      type: isStateRefreshRequest ? "state_refresh_error" : "error",
       message: error.message,
       requestId: typeof payload?.requestId === "string" ? payload.requestId : undefined
     }, userId);
+    if (isStateRefreshRequest) {
+      spindle.log.warn(`SceneMap frontend state request failed: ${error.message}`);
+      return;
+    }
     spindle.toast.error(error.message, {
       title: isGenerationRequest ? "SceneMap generation failed" : "SceneMap",
       duration: isGenerationRequest ? 1e4 : 9000,
