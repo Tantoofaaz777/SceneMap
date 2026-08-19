@@ -4093,6 +4093,7 @@ var toolbarRootRef = null;
 var topToolbarRootRef = null;
 var topToolbarTapTimer = null;
 var topToolbarOpenTimer = null;
+var topToolbarLongPressTimer = null;
 var topToolbarSuppressClickUntil = Number.NEGATIVE_INFINITY;
 var tabHandle = null;
 var dockPanelHandle = null;
@@ -4109,6 +4110,7 @@ var drawerSelectHandles = [];
 var automaticSaveTimer = null;
 var drawerScrollRestoreFrame = null;
 var drawerView = "settings";
+var topToolbarPressGesture = null;
 var appliedTrackerPlacement = null;
 var hasReceivedInitialState = false;
 var regenerationModalHandle = null;
@@ -4119,7 +4121,8 @@ var settingsDraft = new SettingsDraftTracker;
 var automaticSettingsDraft = new AutomaticSettingsDraftTracker;
 var GENERATION_REQUEST_TIMEOUT_MS = 1e4;
 var TOP_TOOLBAR_DOUBLE_CLICK_MS = 280;
-var TOP_TOOLBAR_DOUBLE_TOUCH_MS = 440;
+var TOP_TOOLBAR_LONG_PRESS_MS = 500;
+var TOP_TOOLBAR_PRESS_MOVE_TOLERANCE_PX = 10;
 var iconSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l-6 3V6l6-3 6 3 6-3v15l-6 3-6-3z"/><path d="M9 3v15"/><path d="M15 6v15"/></svg>`;
 var copySvg = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M15 9V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3"/></svg>`;
 var checkSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12.5 4.2 4.2L19 7"/></svg>`;
@@ -4167,7 +4170,11 @@ function setup(ctx) {
   toolbarRoot.classList.add("scenemap-chat-toolbar-root");
   topToolbarRoot.classList.add("scenemap-top-toolbar-host");
   topToolbarRoot.addEventListener("click", handleTopToolbarClick);
+  topToolbarRoot.addEventListener("contextmenu", handleTopToolbarContextMenu);
+  topToolbarRoot.addEventListener("pointerdown", handleTopToolbarPointerDown);
+  topToolbarRoot.addEventListener("pointermove", handleTopToolbarPointerMove);
   topToolbarRoot.addEventListener("pointerup", handleTopToolbarPointerUp);
+  topToolbarRoot.addEventListener("pointercancel", handleTopToolbarPointerCancel);
   topToolbarRoot.addEventListener("keydown", handleTopToolbarKeydown);
   render();
   const offBackend = ctx.onBackendMessage((payload) => {
@@ -4266,7 +4273,11 @@ function setup(ctx) {
     dockRootRef?.removeEventListener("click", handleClick);
     toolbarRoot.removeEventListener("click", handleClick);
     topToolbarRoot.removeEventListener("click", handleTopToolbarClick);
+    topToolbarRoot.removeEventListener("contextmenu", handleTopToolbarContextMenu);
+    topToolbarRoot.removeEventListener("pointerdown", handleTopToolbarPointerDown);
+    topToolbarRoot.removeEventListener("pointermove", handleTopToolbarPointerMove);
     topToolbarRoot.removeEventListener("pointerup", handleTopToolbarPointerUp);
+    topToolbarRoot.removeEventListener("pointercancel", handleTopToolbarPointerCancel);
     topToolbarRoot.removeEventListener("keydown", handleTopToolbarKeydown);
     offBackend();
     for (const off2 of offEvents)
@@ -6185,7 +6196,7 @@ function renderTopToolbarButton() {
       type="button"
       class="scenemap-top-toolbar-btn is-${status.tone} ${isGenerating ? "is-generating" : ""}"
       data-scenemap-top-toolbar-button
-      title="${escapeAttr(`${accessibleLabel} — Double-click to open tracker`)}"
+      title="${escapeAttr(`${accessibleLabel} — Double-click or press and hold to open tracker`)}"
       aria-label="${escapeAttr(accessibleLabel)}"
       ${isEditing || !state.activeMessageId && !isGenerating ? "disabled" : ""}
     >
@@ -6194,24 +6205,91 @@ function renderTopToolbarButton() {
     </button>
   `;
 }
-function handleTopToolbarPointerUp(event) {
+function isTouchLikePointer(event) {
+  return event.pointerType === "touch" || event.pointerType === "pen";
+}
+function handleTopToolbarPointerDown(event) {
   const pointerEvent = event;
+  if (!isTouchLikePointer(pointerEvent))
+    return;
   const button = event.target.closest("[data-scenemap-top-toolbar-button]");
   if (!button || button.disabled || !pointerEvent.isPrimary || pointerEvent.button !== 0)
     return;
-  topToolbarSuppressClickUntil = performance.now() + 800;
-  const delay = pointerEvent.pointerType === "touch" || pointerEvent.pointerType === "pen" ? TOP_TOOLBAR_DOUBLE_TOUCH_MS : TOP_TOOLBAR_DOUBLE_CLICK_MS;
-  scheduleTopToolbarTap(delay);
+  clearTopToolbarPressGesture();
+  if (topToolbarTapTimer)
+    clearTimeout(topToolbarTapTimer);
+  topToolbarTapTimer = null;
+  topToolbarPressGesture = {
+    pointerId: pointerEvent.pointerId,
+    startX: pointerEvent.clientX,
+    startY: pointerEvent.clientY,
+    longPress: false,
+    cancelled: false
+  };
+  topToolbarLongPressTimer = setTimeout(() => {
+    topToolbarLongPressTimer = null;
+    if (topToolbarPressGesture?.pointerId === pointerEvent.pointerId && !topToolbarPressGesture.cancelled) {
+      topToolbarPressGesture.longPress = true;
+    }
+  }, TOP_TOOLBAR_LONG_PRESS_MS);
 }
-function handleTopToolbarClick(event) {
+function handleTopToolbarPointerMove(event) {
+  const pointerEvent = event;
+  const gesture = topToolbarPressGesture;
+  if (!gesture || gesture.pointerId !== pointerEvent.pointerId || gesture.cancelled)
+    return;
+  if (Math.hypot(pointerEvent.clientX - gesture.startX, pointerEvent.clientY - gesture.startY) <= TOP_TOOLBAR_PRESS_MOVE_TOLERANCE_PX)
+    return;
+  gesture.cancelled = true;
+  if (topToolbarLongPressTimer)
+    clearTimeout(topToolbarLongPressTimer);
+  topToolbarLongPressTimer = null;
+}
+function handleTopToolbarPointerUp(event) {
+  const pointerEvent = event;
+  if (!pointerEvent.isPrimary || pointerEvent.button !== 0)
+    return;
   const button = event.target.closest("[data-scenemap-top-toolbar-button]");
+  if (isTouchLikePointer(pointerEvent)) {
+    const gesture = topToolbarPressGesture?.pointerId === pointerEvent.pointerId ? topToolbarPressGesture : null;
+    clearTopToolbarPressGesture();
+    if (!gesture)
+      return;
+    topToolbarSuppressClickUntil = performance.now() + 800;
+    if (!button || button.disabled || gesture.cancelled)
+      return;
+    if (gesture.longPress)
+      queueTopToolbarOpen();
+    else
+      runTopToolbarPrimaryAction();
+    return;
+  }
   if (!button || button.disabled)
     return;
+  topToolbarSuppressClickUntil = performance.now() + 800;
+  scheduleTopToolbarTap(TOP_TOOLBAR_DOUBLE_CLICK_MS);
+}
+function handleTopToolbarPointerCancel(event) {
+  const pointerEvent = event;
+  if (topToolbarPressGesture?.pointerId === pointerEvent.pointerId)
+    clearTopToolbarPressGesture();
+}
+function handleTopToolbarContextMenu(event) {
+  const button = event.target.closest("[data-scenemap-top-toolbar-button]");
+  if (!button)
+    return;
+  event.preventDefault();
+  event.stopPropagation();
+}
+function handleTopToolbarClick(event) {
   if (performance.now() < topToolbarSuppressClickUntil) {
     event.preventDefault();
     event.stopPropagation();
     return;
   }
+  const button = event.target.closest("[data-scenemap-top-toolbar-button]");
+  if (!button || button.disabled)
+    return;
   scheduleTopToolbarTap(TOP_TOOLBAR_DOUBLE_CLICK_MS);
 }
 function handleTopToolbarKeydown(event) {
@@ -6230,18 +6308,27 @@ function scheduleTopToolbarTap(delay) {
   if (topToolbarTapTimer) {
     clearTimeout(topToolbarTapTimer);
     topToolbarTapTimer = null;
-    if (topToolbarOpenTimer)
-      clearTimeout(topToolbarOpenTimer);
-    topToolbarOpenTimer = setTimeout(() => {
-      topToolbarOpenTimer = null;
-      openTrackerSurface();
-    }, 0);
+    queueTopToolbarOpen();
     return;
   }
   topToolbarTapTimer = setTimeout(() => {
     topToolbarTapTimer = null;
     runTopToolbarPrimaryAction();
   }, delay);
+}
+function queueTopToolbarOpen() {
+  if (topToolbarOpenTimer)
+    clearTimeout(topToolbarOpenTimer);
+  topToolbarOpenTimer = setTimeout(() => {
+    topToolbarOpenTimer = null;
+    openTrackerSurface();
+  }, 0);
+}
+function clearTopToolbarPressGesture() {
+  if (topToolbarLongPressTimer)
+    clearTimeout(topToolbarLongPressTimer);
+  topToolbarLongPressTimer = null;
+  topToolbarPressGesture = null;
 }
 function runTopToolbarPrimaryAction() {
   const button = topToolbarRootRef?.querySelector("[data-scenemap-top-toolbar-button]");
@@ -6268,6 +6355,7 @@ function resetTopToolbarTapState() {
   if (topToolbarOpenTimer)
     clearTimeout(topToolbarOpenTimer);
   topToolbarOpenTimer = null;
+  clearTopToolbarPressGesture();
   topToolbarSuppressClickUntil = Number.NEGATIVE_INFINITY;
 }
 function destroyTopToolbarButton() {

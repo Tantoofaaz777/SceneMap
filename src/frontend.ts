@@ -65,6 +65,7 @@ let toolbarRootRef: Element | null = null;
 let topToolbarRootRef: Element | null = null;
 let topToolbarTapTimer: ReturnType<typeof setTimeout> | null = null;
 let topToolbarOpenTimer: ReturnType<typeof setTimeout> | null = null;
+let topToolbarLongPressTimer: ReturnType<typeof setTimeout> | null = null;
 let topToolbarSuppressClickUntil = Number.NEGATIVE_INFINITY;
 let tabHandle: ReturnType<SpindleFrontendContext["ui"]["registerDrawerTab"]> | null = null;
 let dockPanelHandle: ReturnType<SpindleFrontendContext["ui"]["requestDockPanel"]> | null = null;
@@ -82,7 +83,16 @@ let automaticSaveTimer: ReturnType<typeof setTimeout> | null = null;
 let drawerScrollRestoreFrame: number | null = null;
 type DrawerView = "tracker" | "settings" | "macros";
 
+type TopToolbarPressGesture = {
+  pointerId: number;
+  startX: number;
+  startY: number;
+  longPress: boolean;
+  cancelled: boolean;
+};
+
 let drawerView: DrawerView = "settings";
+let topToolbarPressGesture: TopToolbarPressGesture | null = null;
 let appliedTrackerPlacement: SceneMapSettings["trackerPlacement"] | null = null;
 let hasReceivedInitialState = false;
 let regenerationModalHandle: ReturnType<SpindleFrontendContext["ui"]["showModal"]> | null = null;
@@ -142,7 +152,8 @@ const settingsDraft = new SettingsDraftTracker();
 const automaticSettingsDraft = new AutomaticSettingsDraftTracker<SceneMapSettings>();
 const GENERATION_REQUEST_TIMEOUT_MS = 10_000;
 const TOP_TOOLBAR_DOUBLE_CLICK_MS = 280;
-const TOP_TOOLBAR_DOUBLE_TOUCH_MS = 440;
+const TOP_TOOLBAR_LONG_PRESS_MS = 500;
+const TOP_TOOLBAR_PRESS_MOVE_TOLERANCE_PX = 10;
 
 const iconSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l-6 3V6l6-3 6 3 6-3v15l-6 3-6-3z"/><path d="M9 3v15"/><path d="M15 6v15"/></svg>`;
 const copySvg = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M15 9V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3"/></svg>`;
@@ -192,7 +203,11 @@ export function setup(ctx: SpindleFrontendContext) {
   toolbarRoot.classList.add("scenemap-chat-toolbar-root");
   topToolbarRoot.classList.add("scenemap-top-toolbar-host");
   topToolbarRoot.addEventListener("click", handleTopToolbarClick);
+  topToolbarRoot.addEventListener("contextmenu", handleTopToolbarContextMenu);
+  topToolbarRoot.addEventListener("pointerdown", handleTopToolbarPointerDown);
+  topToolbarRoot.addEventListener("pointermove", handleTopToolbarPointerMove);
   topToolbarRoot.addEventListener("pointerup", handleTopToolbarPointerUp);
+  topToolbarRoot.addEventListener("pointercancel", handleTopToolbarPointerCancel);
   topToolbarRoot.addEventListener("keydown", handleTopToolbarKeydown);
   render();
 
@@ -296,7 +311,11 @@ export function setup(ctx: SpindleFrontendContext) {
     dockRootRef?.removeEventListener("click", handleClick);
     toolbarRoot.removeEventListener("click", handleClick);
     topToolbarRoot.removeEventListener("click", handleTopToolbarClick);
+    topToolbarRoot.removeEventListener("contextmenu", handleTopToolbarContextMenu);
+    topToolbarRoot.removeEventListener("pointerdown", handleTopToolbarPointerDown);
+    topToolbarRoot.removeEventListener("pointermove", handleTopToolbarPointerMove);
     topToolbarRoot.removeEventListener("pointerup", handleTopToolbarPointerUp);
+    topToolbarRoot.removeEventListener("pointercancel", handleTopToolbarPointerCancel);
     topToolbarRoot.removeEventListener("keydown", handleTopToolbarKeydown);
     offBackend();
     for (const off of offEvents) off();
@@ -2359,7 +2378,7 @@ function renderTopToolbarButton() {
       type="button"
       class="scenemap-top-toolbar-btn is-${status.tone} ${isGenerating ? "is-generating" : ""}"
       data-scenemap-top-toolbar-button
-      title="${escapeAttr(`${accessibleLabel} — Double-click to open tracker`)}"
+      title="${escapeAttr(`${accessibleLabel} — Double-click or press and hold to open tracker`)}"
       aria-label="${escapeAttr(accessibleLabel)}"
       ${isEditing || (!state.activeMessageId && !isGenerating) ? "disabled" : ""}
     >
@@ -2369,23 +2388,84 @@ function renderTopToolbarButton() {
   `;
 }
 
-function handleTopToolbarPointerUp(event: Event) {
+function isTouchLikePointer(event: PointerEvent): boolean {
+  return event.pointerType === "touch" || event.pointerType === "pen";
+}
+
+function handleTopToolbarPointerDown(event: Event) {
   const pointerEvent = event as PointerEvent;
+  if (!isTouchLikePointer(pointerEvent)) return;
   const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-scenemap-top-toolbar-button]");
   if (!button || button.disabled || !pointerEvent.isPrimary || pointerEvent.button !== 0) return;
-  // Mobile WebViews may synthesize a click with detail=0 after a touch. Suppress
-  // every click following a real pointer event instead of treating detail=0 as
-  // proof of keyboard activation.
+
+  clearTopToolbarPressGesture();
+  if (topToolbarTapTimer) clearTimeout(topToolbarTapTimer);
+  topToolbarTapTimer = null;
+  topToolbarPressGesture = {
+    pointerId: pointerEvent.pointerId,
+    startX: pointerEvent.clientX,
+    startY: pointerEvent.clientY,
+    longPress: false,
+    cancelled: false,
+  };
+  topToolbarLongPressTimer = setTimeout(() => {
+    topToolbarLongPressTimer = null;
+    if (topToolbarPressGesture?.pointerId === pointerEvent.pointerId && !topToolbarPressGesture.cancelled) {
+      topToolbarPressGesture.longPress = true;
+    }
+  }, TOP_TOOLBAR_LONG_PRESS_MS);
+}
+
+function handleTopToolbarPointerMove(event: Event) {
+  const pointerEvent = event as PointerEvent;
+  const gesture = topToolbarPressGesture;
+  if (!gesture || gesture.pointerId !== pointerEvent.pointerId || gesture.cancelled) return;
+  if (Math.hypot(pointerEvent.clientX - gesture.startX, pointerEvent.clientY - gesture.startY)
+    <= TOP_TOOLBAR_PRESS_MOVE_TOLERANCE_PX) return;
+  gesture.cancelled = true;
+  if (topToolbarLongPressTimer) clearTimeout(topToolbarLongPressTimer);
+  topToolbarLongPressTimer = null;
+}
+
+function handleTopToolbarPointerUp(event: Event) {
+  const pointerEvent = event as PointerEvent;
+  if (!pointerEvent.isPrimary || pointerEvent.button !== 0) return;
+  const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-scenemap-top-toolbar-button]");
+  if (isTouchLikePointer(pointerEvent)) {
+    const gesture = topToolbarPressGesture?.pointerId === pointerEvent.pointerId
+      ? topToolbarPressGesture
+      : null;
+    clearTopToolbarPressGesture();
+    if (!gesture) return;
+    // Mobile WebViews synthesize a click after pointerup. It must neither run
+    // a cancelled gesture, the primary action twice, nor close a drawer opened
+    // by the long press.
+    topToolbarSuppressClickUntil = performance.now() + 800;
+    if (!button || button.disabled || gesture.cancelled) return;
+    if (gesture.longPress) queueTopToolbarOpen();
+    else runTopToolbarPrimaryAction();
+    return;
+  }
+  if (!button || button.disabled) return;
+  // The following click is already represented by this pointer activation.
   topToolbarSuppressClickUntil = performance.now() + 800;
-  const delay = pointerEvent.pointerType === "touch" || pointerEvent.pointerType === "pen"
-    ? TOP_TOOLBAR_DOUBLE_TOUCH_MS
-    : TOP_TOOLBAR_DOUBLE_CLICK_MS;
-  scheduleTopToolbarTap(delay);
+  scheduleTopToolbarTap(TOP_TOOLBAR_DOUBLE_CLICK_MS);
+}
+
+function handleTopToolbarPointerCancel(event: Event) {
+  const pointerEvent = event as PointerEvent;
+  if (topToolbarPressGesture?.pointerId === pointerEvent.pointerId) clearTopToolbarPressGesture();
+}
+
+function handleTopToolbarContextMenu(event: Event) {
+  const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-scenemap-top-toolbar-button]");
+  if (!button) return;
+  // Prevent the browser's touch callout from stealing the long-press gesture.
+  event.preventDefault();
+  event.stopPropagation();
 }
 
 function handleTopToolbarClick(event: Event) {
-  const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-scenemap-top-toolbar-button]");
-  if (!button || button.disabled) return;
   // Pointer activations are already handled on pointerup. This click path is a
   // fallback for assistive technology and browsers without Pointer Events.
   if (performance.now() < topToolbarSuppressClickUntil) {
@@ -2393,6 +2473,8 @@ function handleTopToolbarClick(event: Event) {
     event.stopPropagation();
     return;
   }
+  const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-scenemap-top-toolbar-button]");
+  if (!button || button.disabled) return;
   scheduleTopToolbarTap(TOP_TOOLBAR_DOUBLE_CLICK_MS);
 }
 
@@ -2411,20 +2493,30 @@ function scheduleTopToolbarTap(delay: number) {
   if (topToolbarTapTimer) {
     clearTimeout(topToolbarTapTimer);
     topToolbarTapTimer = null;
-    // Opening a mobile drawer synchronously from pointerup lets the synthetic
-    // click land on the newly mounted backdrop and close it immediately. Run
-    // after the activation event has finished propagating instead.
-    if (topToolbarOpenTimer) clearTimeout(topToolbarOpenTimer);
-    topToolbarOpenTimer = setTimeout(() => {
-      topToolbarOpenTimer = null;
-      openTrackerSurface();
-    }, 0);
+    queueTopToolbarOpen();
     return;
   }
   topToolbarTapTimer = setTimeout(() => {
     topToolbarTapTimer = null;
     runTopToolbarPrimaryAction();
   }, delay);
+}
+
+function queueTopToolbarOpen() {
+  // Opening a mobile drawer synchronously from pointerup lets the synthetic
+  // click land on the newly mounted backdrop and close it immediately. Run
+  // after the activation event has finished propagating instead.
+  if (topToolbarOpenTimer) clearTimeout(topToolbarOpenTimer);
+  topToolbarOpenTimer = setTimeout(() => {
+    topToolbarOpenTimer = null;
+    openTrackerSurface();
+  }, 0);
+}
+
+function clearTopToolbarPressGesture() {
+  if (topToolbarLongPressTimer) clearTimeout(topToolbarLongPressTimer);
+  topToolbarLongPressTimer = null;
+  topToolbarPressGesture = null;
 }
 
 function runTopToolbarPrimaryAction() {
@@ -2451,6 +2543,7 @@ function resetTopToolbarTapState() {
   topToolbarTapTimer = null;
   if (topToolbarOpenTimer) clearTimeout(topToolbarOpenTimer);
   topToolbarOpenTimer = null;
+  clearTopToolbarPressGesture();
   topToolbarSuppressClickUntil = Number.NEGATIVE_INFINITY;
 }
 
