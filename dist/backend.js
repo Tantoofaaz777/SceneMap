@@ -3415,6 +3415,38 @@ async function deleteTracker(messageId, userId) {
   spindle.toast.success("Tracker deleted.", { title: "SceneMap", userId });
   await pushState(userId);
 }
+async function refreshAfterUnrelatedMessageDelete(chatId, deletedMessageId, trackerMessageId, userId) {
+  if (typeof chatId !== "string" || !chatId)
+    throw new Error("The deleted message chat is missing.");
+  if (typeof deletedMessageId !== "string" || !deletedMessageId)
+    throw new Error("The deleted message is missing.");
+  if (typeof trackerMessageId !== "string" || !trackerMessageId)
+    throw new Error("The tracker message is missing.");
+  if (deletedMessageId === trackerMessageId) {
+    await pushState(userId);
+    return;
+  }
+  const activeChat = await spindle.chats.getActive(userId);
+  if (!activeChat || activeChat.id !== chatId)
+    return;
+  const messages = await spindle.chat.getMessages(chatId);
+  if (!messages.some((message) => message.id === trackerMessageId)) {
+    await pushState(userId);
+    return;
+  }
+  const settings = await loadSettings(userId);
+  const activeMessage = findLatestAssistantMessage(messages);
+  const latestReference = { messageId: trackerMessageId };
+  spindle.sendToFrontend({
+    type: "message_deletion_refresh",
+    chatId,
+    trackerMessageId,
+    messagesBehind: countAssistantMessagesAfter(messages, trackerMessageId),
+    autoGenerateMessagesRemaining: getAutoGenerateMessagesRemaining(settings, messages, latestReference, activeMessage),
+    activeMessageId: activeMessage?.id ?? null,
+    activeSwipeId: activeMessage ? getActiveSwipeId(activeMessage) : null
+  }, userId);
+}
 var registerPullMacro = spindle.registerMacro;
 registerPullMacro({
   name: "scenemap",
@@ -3447,6 +3479,9 @@ spindle.onFrontendMessage(async (payload, userId) => {
         await pushState(userId, {
           stateRequestId: typeof payload.requestId === "string" ? payload.requestId : ""
         });
+        break;
+      case "refresh_after_message_delete":
+        await refreshAfterUnrelatedMessageDelete(payload.chatId, payload.deletedMessageId, payload.trackerMessageId, userId);
         break;
       case "save_preset_settings":
         await settingsSaveQueue.enqueue(userId, () => savePresetSettings(payload.settings, userId));
@@ -3503,7 +3538,7 @@ spindle.onFrontendMessage(async (payload, userId) => {
     }
   } catch (error) {
     const isGenerationRequest = payload?.type === "generate_tracker" || payload?.type === "regenerate_fields";
-    const isStateRefreshRequest = payload?.type === "get_state";
+    const isStateRefreshRequest = payload?.type === "get_state" || payload?.type === "refresh_after_message_delete";
     spindle.sendToFrontend({
       type: isStateRefreshRequest ? "state_refresh_error" : "error",
       message: error.message,

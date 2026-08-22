@@ -30,6 +30,7 @@ import {
 } from "./partial-regeneration";
 import { getTopToolbarStatus } from "./top-toolbar-status";
 import { StateRefreshGate } from "./state-refresh-gate";
+import { decideMessageDeletionRefresh } from "./message-deletion-refresh";
 import {
   appendTrackerArrayItem,
   cloneTrackerEditValue,
@@ -274,6 +275,30 @@ export function setup(ctx: SpindleFrontendContext) {
       renderTopToolbarButton();
       return;
     }
+    if (payload?.type === "message_deletion_refresh") {
+      if (
+        payload.chatId !== state.chatId
+        || payload.trackerMessageId !== state.latest?.messageId
+      ) return;
+      state = {
+        ...state,
+        messagesBehind: Number.isSafeInteger(payload.messagesBehind) && payload.messagesBehind >= 0
+          ? payload.messagesBehind
+          : state.messagesBehind,
+        autoGenerateMessagesRemaining: payload.autoGenerateMessagesRemaining === null
+          || (Number.isSafeInteger(payload.autoGenerateMessagesRemaining) && payload.autoGenerateMessagesRemaining >= 0)
+          ? payload.autoGenerateMessagesRemaining
+          : state.autoGenerateMessagesRemaining,
+        activeMessageId: typeof payload.activeMessageId === "string" ? payload.activeMessageId : null,
+        activeSwipeId: Number.isSafeInteger(payload.activeSwipeId) && payload.activeSwipeId >= 0
+          ? payload.activeSwipeId
+          : null,
+      };
+      renderTrackerSurfaces();
+      renderChatToolbar();
+      renderTopToolbarButton();
+      return;
+    }
     if (payload?.type === "error") {
       const saveFailed = typeof payload.requestId === "string" && settingsDraft.fail(payload.requestId);
       const automaticSaveFailed = typeof payload.requestId === "string" && automaticSettingsDraft.fail(payload.requestId);
@@ -304,7 +329,7 @@ export function setup(ctx: SpindleFrontendContext) {
   const offEvents = [
     ctx.events.on("CHAT_SWITCHED", () => requestState()),
     ctx.events.on("MESSAGE_EDITED", () => requestState()),
-    ctx.events.on("MESSAGE_DELETED", () => requestState()),
+    ctx.events.on("MESSAGE_DELETED", handleMessageDeleted),
     ctx.events.on("MESSAGE_SWIPED", () => requestState()),
     ctx.events.on("SWIPE_EDITED", () => requestState()),
   ];
@@ -444,6 +469,21 @@ function requestState() {
   const requestId = `state-${++stateRequestSeq}`;
   if (!stateRefreshGate.begin(requestId)) return;
   send({ type: "get_state", requestId });
+}
+
+function handleMessageDeleted(payload: unknown) {
+  const decision = decideMessageDeletionRefresh(state, payload);
+  if (decision.kind === "ignore") return;
+  if (decision.kind === "full") {
+    requestState();
+    return;
+  }
+  send({
+    type: "refresh_after_message_delete",
+    chatId: decision.chatId,
+    deletedMessageId: decision.deletedMessageId,
+    trackerMessageId: decision.trackerMessageId,
+  });
 }
 
 function finishStateRequest(value: unknown): boolean {

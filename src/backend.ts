@@ -319,7 +319,12 @@ function findLatestAssistantMessage(messages: ChatMessage[]): ChatMessage | null
   return null;
 }
 
-function getAutoGenerateMessagesRemaining(settings: SceneMapSettings, messages: ChatMessage[], latest: TrackerEntry | null, activeMessage: ChatMessage | null): number | null {
+function getAutoGenerateMessagesRemaining(
+  settings: SceneMapSettings,
+  messages: ChatMessage[],
+  latest: Pick<TrackerEntry, "messageId"> | null,
+  activeMessage: ChatMessage | null,
+): number | null {
   if (!settings.autoGenerateAiTrackers || !activeMessage || activeMessage.role !== "assistant") return null;
   const interval = Math.max(1, Math.floor(settings.autoGenerateInterval || 1));
   const messagesDue = latest
@@ -1325,6 +1330,49 @@ async function deleteTracker(messageId: string, userId?: string) {
   await pushState(userId);
 }
 
+async function refreshAfterUnrelatedMessageDelete(
+  chatId: unknown,
+  deletedMessageId: unknown,
+  trackerMessageId: unknown,
+  userId: string,
+) {
+  if (typeof chatId !== "string" || !chatId) throw new Error("The deleted message chat is missing.");
+  if (typeof deletedMessageId !== "string" || !deletedMessageId) throw new Error("The deleted message is missing.");
+  if (typeof trackerMessageId !== "string" || !trackerMessageId) throw new Error("The tracker message is missing.");
+  if (deletedMessageId === trackerMessageId) {
+    await pushState(userId);
+    return;
+  }
+
+  const activeChat = await spindle.chats.getActive(userId) as ActiveChat | null;
+  if (!activeChat || activeChat.id !== chatId) return;
+  const messages = (await spindle.chat.getMessages(chatId)) as ChatMessage[];
+  // The caller saw a different message being deleted. If the tracker anchor is
+  // also gone, fall back to an authoritative snapshot instead of preserving it.
+  if (!messages.some((message) => message.id === trackerMessageId)) {
+    await pushState(userId);
+    return;
+  }
+
+  const settings = await loadSettings(userId);
+  const activeMessage = findLatestAssistantMessage(messages);
+  const latestReference = { messageId: trackerMessageId };
+  spindle.sendToFrontend({
+    type: "message_deletion_refresh",
+    chatId,
+    trackerMessageId,
+    messagesBehind: countAssistantMessagesAfter(messages, trackerMessageId),
+    autoGenerateMessagesRemaining: getAutoGenerateMessagesRemaining(
+      settings,
+      messages,
+      latestReference,
+      activeMessage,
+    ),
+    activeMessageId: activeMessage?.id ?? null,
+    activeSwipeId: activeMessage ? getActiveSwipeId(activeMessage) : null,
+  }, userId);
+}
+
 // The Lumiverse runtime accepts async volatile pull handlers, while the installed
 // type package still narrows this overload to the static handler shape.
 const registerPullMacro = spindle.registerMacro as unknown as (definition: PullMacroDefinition) => void;
@@ -1361,6 +1409,14 @@ spindle.onFrontendMessage(async (payload: any, userId?: string) => {
         await pushState(userId, {
           stateRequestId: typeof payload.requestId === "string" ? payload.requestId : "",
         });
+        break;
+      case "refresh_after_message_delete":
+        await refreshAfterUnrelatedMessageDelete(
+          payload.chatId,
+          payload.deletedMessageId,
+          payload.trackerMessageId,
+          userId,
+        );
         break;
       case "save_preset_settings":
         await settingsSaveQueue.enqueue(userId, () => savePresetSettings(payload.settings, userId));
@@ -1424,7 +1480,8 @@ spindle.onFrontendMessage(async (payload: any, userId?: string) => {
     }
   } catch (error) {
     const isGenerationRequest = payload?.type === "generate_tracker" || payload?.type === "regenerate_fields";
-    const isStateRefreshRequest = payload?.type === "get_state";
+    const isStateRefreshRequest = payload?.type === "get_state"
+      || payload?.type === "refresh_after_message_delete";
     spindle.sendToFrontend({
       type: isStateRefreshRequest ? "state_refresh_error" : "error",
       message: (error as Error).message,

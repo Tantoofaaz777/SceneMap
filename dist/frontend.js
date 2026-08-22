@@ -3901,6 +3901,25 @@ class StateRefreshGate {
   }
 }
 
+// src/message-deletion-refresh.ts
+function decideMessageDeletionRefresh(state, payload) {
+  const event = payload && typeof payload === "object" && !Array.isArray(payload) ? payload : null;
+  const eventChatId = typeof event?.chatId === "string" && event.chatId ? event.chatId : null;
+  const deletedMessageId = typeof event?.messageId === "string" && event.messageId ? event.messageId : null;
+  if (eventChatId && state.chatId && eventChatId !== state.chatId)
+    return { kind: "ignore" };
+  if (!state.chatId || !state.latest || !deletedMessageId)
+    return { kind: "full" };
+  if (deletedMessageId === state.latest.messageId)
+    return { kind: "full" };
+  return {
+    kind: "derived",
+    chatId: state.chatId,
+    deletedMessageId,
+    trackerMessageId: state.latest.messageId
+  };
+}
+
 // src/tracker-inline-edit.ts
 var blockedPathKeys = new Set(["__proto__", "prototype", "constructor"]);
 function getRecord2(value) {
@@ -4267,6 +4286,21 @@ function setup(ctx) {
       renderTopToolbarButton();
       return;
     }
+    if (payload?.type === "message_deletion_refresh") {
+      if (payload.chatId !== state.chatId || payload.trackerMessageId !== state.latest?.messageId)
+        return;
+      state = {
+        ...state,
+        messagesBehind: Number.isSafeInteger(payload.messagesBehind) && payload.messagesBehind >= 0 ? payload.messagesBehind : state.messagesBehind,
+        autoGenerateMessagesRemaining: payload.autoGenerateMessagesRemaining === null || Number.isSafeInteger(payload.autoGenerateMessagesRemaining) && payload.autoGenerateMessagesRemaining >= 0 ? payload.autoGenerateMessagesRemaining : state.autoGenerateMessagesRemaining,
+        activeMessageId: typeof payload.activeMessageId === "string" ? payload.activeMessageId : null,
+        activeSwipeId: Number.isSafeInteger(payload.activeSwipeId) && payload.activeSwipeId >= 0 ? payload.activeSwipeId : null
+      };
+      renderTrackerSurfaces();
+      renderChatToolbar();
+      renderTopToolbarButton();
+      return;
+    }
     if (payload?.type === "error") {
       const saveFailed = typeof payload.requestId === "string" && settingsDraft.fail(payload.requestId);
       const automaticSaveFailed = typeof payload.requestId === "string" && automaticSettingsDraft.fail(payload.requestId);
@@ -4295,7 +4329,7 @@ function setup(ctx) {
   const offEvents = [
     ctx.events.on("CHAT_SWITCHED", () => requestState()),
     ctx.events.on("MESSAGE_EDITED", () => requestState()),
-    ctx.events.on("MESSAGE_DELETED", () => requestState()),
+    ctx.events.on("MESSAGE_DELETED", handleMessageDeleted),
     ctx.events.on("MESSAGE_SWIPED", () => requestState()),
     ctx.events.on("SWIPE_EDITED", () => requestState())
   ];
@@ -4429,6 +4463,21 @@ function requestState() {
   if (!stateRefreshGate.begin(requestId))
     return;
   send({ type: "get_state", requestId });
+}
+function handleMessageDeleted(payload) {
+  const decision = decideMessageDeletionRefresh(state, payload);
+  if (decision.kind === "ignore")
+    return;
+  if (decision.kind === "full") {
+    requestState();
+    return;
+  }
+  send({
+    type: "refresh_after_message_delete",
+    chatId: decision.chatId,
+    deletedMessageId: decision.deletedMessageId,
+    trackerMessageId: decision.trackerMessageId
+  });
 }
 function finishStateRequest(value) {
   const completion = stateRefreshGate.complete(value);
