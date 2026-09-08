@@ -4212,9 +4212,8 @@ function setup(ctx) {
     syncTrackerPlacement();
     renderDrawerContent();
   });
-  const mountHostPoint = ctx.ui.mount;
-  const toolbarRoot = mountHostPoint("chat_actions");
-  const topToolbarRoot = mountHostPoint("chat_top_dock");
+  const toolbarRoot = ctx.ui.mount("chat_actions");
+  const topToolbarRoot = ctx.ui.mount("chat_top_dock");
   toolbarRootRef = toolbarRoot;
   topToolbarRootRef = topToolbarRoot;
   toolbarRoot.classList.add("scenemap-chat-toolbar-root");

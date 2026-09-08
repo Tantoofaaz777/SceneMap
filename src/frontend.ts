@@ -138,10 +138,6 @@ type DockPanelOptionsWithGeometry = Parameters<SpindleFrontendContext["ui"]["req
   persistGeometry: string;
 };
 
-type SceneMapHostMountPoint = Parameters<SpindleFrontendContext["ui"]["mount"]>[0]
-  | "chat_actions"
-  | "chat_top_dock";
-
 const presetEditorDrafts = new Map<string, PresetEditorDraft>();
 
 type PendingTextEditor = {
@@ -200,10 +196,8 @@ export function setup(ctx: SpindleFrontendContext) {
     renderDrawerContent();
   });
   // These host-owned anchors keep both buttons attached across chat remounts.
-  // The runtime exposes them before the published mount-point union does.
-  const mountHostPoint = ctx.ui.mount as (point: SceneMapHostMountPoint) => Element;
-  const toolbarRoot = mountHostPoint("chat_actions");
-  const topToolbarRoot = mountHostPoint("chat_top_dock");
+  const toolbarRoot = ctx.ui.mount("chat_actions");
+  const topToolbarRoot = ctx.ui.mount("chat_top_dock");
   toolbarRootRef = toolbarRoot;
   topToolbarRootRef = topToolbarRoot;
   toolbarRoot.classList.add("scenemap-chat-toolbar-root");
