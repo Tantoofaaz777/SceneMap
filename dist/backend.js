@@ -424,7 +424,7 @@ function schemaToExample(schema, rootSchema = schema, seenRefs = new Set) {
     }
     return parts.find((part) => part !== null) ?? null;
   }
-  const declaredType = Array.isArray(schema.type) ? schema.type.find((type2) => type2 !== "null") : schema.type;
+  const declaredType = Array.isArray(schema.type) ? schema.type.find((type) => type !== "null") : schema.type;
   const type = declaredType ?? (schema.properties ? "object" : schema.items ? "array" : undefined);
   switch (type) {
     case "object": {
@@ -1063,8 +1063,8 @@ function validate(instance, schema, draft = "2019-09", lookup = dereference(sche
     }
   }
   if ($ref !== undefined) {
-    const uri2 = __absolute_ref__ || $ref;
-    const refSchema = lookup[uri2];
+    const uri = __absolute_ref__ || $ref;
+    const refSchema = lookup[uri];
     if (refSchema === undefined) {
       let message = `Unresolved $ref "${$ref}".`;
       if (__absolute_ref__ && __absolute_ref__ !== $ref) {
@@ -1415,10 +1415,10 @@ Known schemas:
     if (!stop && $patternProperties !== undefined) {
       const keywordLocation = `${schemaLocation}/patternProperties`;
       for (const pattern in $patternProperties) {
-        const regex2 = new RegExp(pattern, "u");
+        const regex = new RegExp(pattern, "u");
         const subSchema = $patternProperties[pattern];
         for (const key in instance) {
-          if (!regex2.test(key)) {
+          if (!regex.test(key)) {
             continue;
           }
           const subInstancePointer = `${instanceLocation}/${encodePointer(key)}`;
@@ -1552,16 +1552,16 @@ Known schemas:
         }
       }
       if (!stop && $additionalItems !== undefined) {
-        const keywordLocation2 = `${schemaLocation}/additionalItems`;
+        const keywordLocation = `${schemaLocation}/additionalItems`;
         for (;i < length; i++) {
-          const result = validate(instance[i], $additionalItems, draft, lookup, shortCircuit, recursiveAnchor, `${instanceLocation}/${i}`, keywordLocation2);
+          const result = validate(instance[i], $additionalItems, draft, lookup, shortCircuit, recursiveAnchor, `${instanceLocation}/${i}`, keywordLocation);
           evaluated[i] = true;
           if (!result.valid) {
             stop = shortCircuit;
             errors.push({
               instanceLocation,
               keyword: "additionalItems",
-              keywordLocation: keywordLocation2,
+              keywordLocation,
               error: `Items did not match additional items schema.`
             }, ...result.errors);
           }
@@ -1987,6 +1987,100 @@ function getTrackerStore(metadata) {
   return data;
 }
 
+// src/swipe-tracker-remap.ts
+function record(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+function getCollapsedSwipe(payload) {
+  const event = record(payload);
+  const message = record(event?.message);
+  const previousSwipeId = event?.previousSwipeId;
+  if (typeof event?.chatId !== "string" || !event.chatId || typeof message?.id !== "string" || !message.id || !Number.isSafeInteger(previousSwipeId) || previousSwipeId < 0 || message.swipe_id !== 0 || !Array.isArray(message.swipes) || message.swipes.length !== 1 || typeof message.swipes[0] !== "string")
+    return null;
+  const metadata = record(message.metadata) ?? record(record(message.extra)?.spindle_metadata);
+  const trackerStore = record(metadata?.[MESSAGE_METADATA_KEY]);
+  if (!trackerStore)
+    return null;
+  if (!remapCollapsedSwipeMetadata(metadata, previousSwipeId))
+    return null;
+  const date = Array.isArray(message.swipe_dates) ? message.swipe_dates[0] : null;
+  return {
+    chatId: event.chatId,
+    messageId: message.id,
+    previousSwipeId,
+    content: message.swipes[0],
+    date: typeof date === "number" && Number.isFinite(date) ? date : null,
+    trackerStore: structuredClone(trackerStore)
+  };
+}
+function remapCollapsedSwipeMetadata(metadata, previousSwipeId) {
+  if (!Number.isSafeInteger(previousSwipeId) || previousSwipeId < 0)
+    return null;
+  const store = record(metadata[MESSAGE_METADATA_KEY]);
+  if (!store)
+    return null;
+  const next = { ...metadata };
+  const swipes = record(store.swipes);
+  if (swipes) {
+    const retained = record(swipes[String(previousSwipeId)]);
+    if (retained && "value" in retained) {
+      const { value: _value, swipeId: _swipeId, ...rest } = store;
+      next[MESSAGE_METADATA_KEY] = { ...rest, swipes: { 0: retained } };
+    } else {
+      delete next[MESSAGE_METADATA_KEY];
+    }
+  } else if ("value" in store) {
+    if (typeof store.swipeId !== "number" || store.swipeId === previousSwipeId) {
+      next[MESSAGE_METADATA_KEY] = { ...store, swipeId: 0 };
+    } else {
+      delete next[MESSAGE_METADATA_KEY];
+    }
+  } else {
+    return null;
+  }
+  return jsonValuesEqual(metadata, next) ? null : next;
+}
+async function repairCollapsedSwipeTracker(collapse, api) {
+  const messages = await api.getMessages(collapse.chatId);
+  const current = messages.find((message) => message.id === collapse.messageId);
+  if (!current || current.swipe_id !== 0 || current.swipes?.length !== 1 || current.swipes[0] !== collapse.content || collapse.date !== null && current.swipe_dates?.[0] !== collapse.date || !jsonValuesEqual(current.metadata?.[MESSAGE_METADATA_KEY], collapse.trackerStore))
+    return false;
+  const metadata = remapCollapsedSwipeMetadata(current.metadata ?? {}, collapse.previousSwipeId);
+  if (!metadata)
+    return false;
+  await api.updateMessage(collapse.chatId, collapse.messageId, { metadata });
+  return true;
+}
+async function repairCollapsedSwipeTrackers(collapses, api) {
+  if (collapses.length === 0)
+    return { repaired: 0, errors: [] };
+  const chatId = collapses[0].chatId;
+  if (collapses.some((collapse) => collapse.chatId !== chatId)) {
+    throw new Error("Tracker repairs must belong to the same chat.");
+  }
+  const messages = await api.getMessages(chatId);
+  const batchApi = {
+    getMessages: async () => messages,
+    updateMessage: async (chatId, messageId, patch) => {
+      await api.updateMessage(chatId, messageId, patch);
+      const message = messages.find((item) => item.id === messageId);
+      if (message)
+        message.metadata = patch.metadata;
+    }
+  };
+  let repaired = 0;
+  const errors = [];
+  for (const collapse of collapses) {
+    try {
+      if (await repairCollapsedSwipeTracker(collapse, batchApi))
+        repaired++;
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  return { repaired, errors };
+}
+
 // src/keyed-async-queue.ts
 class KeyedAsyncQueue {
   tails = new Map;
@@ -2018,8 +2112,8 @@ function captureSwipeSnapshot(message, swipeId) {
     content = message.content;
   if (typeof content !== "string")
     return null;
-  const date2 = Array.isArray(message.swipe_dates) && Number.isFinite(message.swipe_dates[swipeId]) ? message.swipe_dates[swipeId] : null;
-  return { content, date: date2 };
+  const date = Array.isArray(message.swipe_dates) && Number.isFinite(message.swipe_dates[swipeId]) ? message.swipe_dates[swipeId] : null;
+  return { content, date };
 }
 function swipeSnapshotMatches(snapshot, message, swipeId) {
   const current = captureSwipeSnapshot(message, swipeId);
@@ -2418,6 +2512,8 @@ var activeGenerations = new GenerationRegistry;
 var worldInfoActivations = new WorldInfoActivationCache;
 var statePushQueue = new KeyedAsyncQueue;
 var settingsSaveQueue = new KeyedAsyncQueue;
+var swipeTrackerRepairQueue = new KeyedAsyncQueue;
+var pendingSwipeTrackerRepairs = new Map;
 var STATE_BUILD_TIMEOUT_MS = 1e4;
 var STATE_BUILD_TIMEOUT_MESSAGE = "SceneMap timed out while refreshing its state.";
 var OPTIONAL_STATE_READ_TIMEOUT_MS = 2500;
@@ -3583,6 +3679,37 @@ for (const event of ["MESSAGE_EDITED", "MESSAGE_DELETED", "MESSAGE_SWIPED", "SWI
       worldInfoActivations.invalidateChat(userId, chatId);
   });
 }
+spindle.on("SWIPE_EDITED", (payload, userId) => {
+  if (!userId)
+    return;
+  const collapse = getCollapsedSwipe(payload);
+  if (!collapse)
+    return;
+  const key = `${userId}:${collapse.chatId}`;
+  const pending = pendingSwipeTrackerRepairs.get(key);
+  if (pending) {
+    pending.push(collapse);
+    return;
+  }
+  const batch = [collapse];
+  pendingSwipeTrackerRepairs.set(key, batch);
+  setTimeout(() => {
+    pendingSwipeTrackerRepairs.delete(key);
+    swipeTrackerRepairQueue.enqueue(key, async () => {
+      const result = await repairCollapsedSwipeTrackers(batch, {
+        getMessages: (chatId) => spindle.chat.getMessages(chatId),
+        updateMessage: (chatId, messageId, patch) => spindle.chat.updateMessage(chatId, messageId, patch)
+      });
+      if (result.repaired)
+        pushStateInBackground(userId);
+      for (const error of result.errors) {
+        spindle.log.error(`SceneMap could not preserve a tracker after swipe cleanup: ${error.message}`);
+      }
+    }).catch((error) => {
+      spindle.log.error(`SceneMap could not preserve trackers after swipe cleanup: ${error.message}`);
+    });
+  }, 25);
+});
 spindle.on("GENERATION_ENDED", (payload, userId) => {
   if (!userId) {
     if (!payload.error && payload.messageId) {

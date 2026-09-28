@@ -25,6 +25,7 @@ import {
 } from "./schema-validator";
 import { GenerationRegistry } from "./generation-registry";
 import { mergeTrackerMetadata } from "./tracker-metadata";
+import { getCollapsedSwipe, repairCollapsedSwipeTrackers, type CollapsedSwipe } from "./swipe-tracker-remap";
 import { KeyedAsyncQueue } from "./keyed-async-queue";
 import { captureSwipeSnapshot, swipeSnapshotMatches } from "./swipe-snapshot";
 import { resolveMessageCharacterId } from "./group-character-context";
@@ -106,6 +107,8 @@ const worldInfoActivations = new WorldInfoActivationCache();
 // prevents slow storage/API calls from delivering stale acknowledgements last.
 const statePushQueue = new KeyedAsyncQueue();
 const settingsSaveQueue = new KeyedAsyncQueue();
+const swipeTrackerRepairQueue = new KeyedAsyncQueue();
+const pendingSwipeTrackerRepairs = new Map<string, CollapsedSwipe[]>();
 const STATE_BUILD_TIMEOUT_MS = 10_000;
 const STATE_BUILD_TIMEOUT_MESSAGE = "SceneMap timed out while refreshing its state.";
 const OPTIONAL_STATE_READ_TIMEOUT_MS = 2_500;
@@ -1529,6 +1532,40 @@ for (const event of ["MESSAGE_EDITED", "MESSAGE_DELETED", "MESSAGE_SWIPED", "SWI
     if (chatId) worldInfoActivations.invalidateChat(userId, chatId);
   });
 }
+
+// SwipeScrubber (and similar extensions) preserves one variant but resets its
+// index to zero. SceneMap owns the indexed tracker metadata, so migrate it here
+// instead of requiring every chat housekeeping extension to know our format.
+spindle.on("SWIPE_EDITED", (payload: unknown, userId?: string) => {
+  if (!userId) return;
+  const collapse = getCollapsedSwipe(payload);
+  if (!collapse) return;
+  const key = `${userId}:${collapse.chatId}`;
+  const pending = pendingSwipeTrackerRepairs.get(key);
+  if (pending) {
+    pending.push(collapse);
+    return;
+  }
+  const batch = [collapse];
+  pendingSwipeTrackerRepairs.set(key, batch);
+  // Collect a burst from Scrub All / auto-scrub without rebuilding state for
+  // every message. Do not reset the timer: continuous scrubs must still drain.
+  setTimeout(() => {
+    pendingSwipeTrackerRepairs.delete(key);
+    void swipeTrackerRepairQueue.enqueue(key, async () => {
+      const result = await repairCollapsedSwipeTrackers(batch, {
+        getMessages: (chatId) => spindle.chat.getMessages(chatId) as Promise<ChatMessage[]>,
+        updateMessage: (chatId, messageId, patch) => spindle.chat.updateMessage(chatId, messageId, patch),
+      });
+      if (result.repaired) pushStateInBackground(userId);
+      for (const error of result.errors) {
+        spindle.log.error(`SceneMap could not preserve a tracker after swipe cleanup: ${(error as Error).message}`);
+      }
+    }).catch((error) => {
+      spindle.log.error(`SceneMap could not preserve trackers after swipe cleanup: ${(error as Error).message}`);
+    });
+  }, 25);
+});
 
 spindle.on("GENERATION_ENDED", (payload: GenerationEndedPayloadDTO, userId?: string) => {
   if (!userId) {
