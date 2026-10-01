@@ -19,11 +19,11 @@ export type SceneMapPromptTemplateValues = {
 };
 
 export const SCENEMAP_PROMPT_MACROS = [
-  { token: "{{scenemap_context}}", description: "Character, persona, scenario and active World Info, with separators." },
+  { token: "{{scenemap_context}}", description: "Character, persona, scenario and activated entries from this chat's selected lorebooks, with separators." },
   { token: "{{scenemap_character}}", description: "Character description and personality." },
   { token: "{{scenemap_persona}}", description: "Active persona description." },
   { token: "{{scenemap_scenario}}", description: "Character scenario." },
-  { token: "{{scenemap_world_info}}", description: "Active World Book entries." },
+  { token: "{{scenemap_world_info}}", description: "Activated entries from the lorebooks selected for SceneMap in this chat." },
   { token: "{{scenemap_chat_history::N}}", description: "Last N messages in chronological order, separated by a blank line. Omit ::N for all." },
   { token: "{{scenemap_schema}}", description: "Configured tracker schema." },
   { token: "{{scenemap_response_schema}}", description: "Schema expected for this operation, including partial regeneration." },

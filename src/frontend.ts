@@ -45,6 +45,8 @@ import {
   type TrackerEditPath,
 } from "./tracker-inline-edit";
 import { LEGACY_SCENEMAP_PROMPT_MACROS, SCENEMAP_PROMPT_MACROS } from "./prompt-templates";
+import { LorebookSelectionDraft } from "./lorebook-selection";
+import { countSelectedLorebooks, renderLorebookPanel } from "./lorebook-panel";
 
 let state: SceneMapState = {
   settings: defaultSettings,
@@ -58,6 +60,9 @@ let state: SceneMapState = {
   generationActive: false,
   generatingMessageId: null,
   connections: [],
+  lorebookGroups: [],
+  selectedLorebookIds: [],
+  lorebookError: null,
 };
 
 let ctxRef: SpindleFrontendContext | null = null;
@@ -81,6 +86,8 @@ let trackerEditRequestSeq = 0;
 let settingsSaveRequestSeq = 0;
 let automaticSaveRequestSeq = 0;
 let stateRequestSeq = 0;
+let lorebookSelectionRequestSeq = 0;
+let confirmedLorebookSelection: { chatId: string | null; ids: string[] } = { chatId: null, ids: [] };
 let drawerSelectHandles: SpindleSelectHandle[] = [];
 let automaticSaveTimer: ReturnType<typeof setTimeout> | null = null;
 let drawerScrollRestoreFrame: number | null = null;
@@ -150,6 +157,7 @@ const pendingTextEditors = new Map<string, PendingTextEditor>();
 const settingsDraft = new SettingsDraftTracker();
 const automaticSettingsDraft = new AutomaticSettingsDraftTracker<SceneMapSettings>();
 const stateRefreshGate = new StateRefreshGate();
+const lorebookSelectionDraft = new LorebookSelectionDraft();
 const GENERATION_REQUEST_TIMEOUT_MS = 10_000;
 const STATE_LOAD_ERROR = "SceneMap could not load its state. It will retry after the next chat update.";
 const TOP_TOOLBAR_DOUBLE_CLICK_MS = 280;
@@ -165,6 +173,7 @@ export function setup(ctx: SpindleFrontendContext) {
   trackerEditSession = null;
   settingsDraft.reset();
   automaticSettingsDraft.reset();
+  lorebookSelectionDraft.reset();
   presetEditorDrafts.clear();
   pendingTextEditors.clear();
   settingsDraft.initialize(presetSettingsFingerprint(state.settings));
@@ -219,6 +228,10 @@ export function setup(ctx: SpindleFrontendContext) {
       const preserveActiveSettings = settingsSurfaceHasActiveInteraction();
       const previousState = state;
       const incomingState = payload.state as SceneMapState;
+      confirmedLorebookSelection = { chatId: incomingState.chatId, ids: incomingState.selectedLorebookIds };
+      if (typeof payload.lorebookSelectionRequestId === "string") {
+        lorebookSelectionDraft.settle(payload.lorebookSelectionRequestId);
+      }
       hasReceivedInitialState = true;
       if (trackerRuntimeError === STATE_LOAD_ERROR) trackerRuntimeError = null;
       reconcileTrackerEditSession(incomingState, payload);
@@ -236,6 +249,7 @@ export function setup(ctx: SpindleFrontendContext) {
       const nextState: SceneMapState = {
         ...incomingState,
         settings: automaticSettingsDraft.overlay(baseSettings),
+        selectedLorebookIds: lorebookSelectionDraft.overlay(incomingState.chatId, incomingState.selectedLorebookIds),
       };
       state = nextState;
       if (!settingsDraft.dirty && !settingsDraft.saving) {
@@ -296,15 +310,25 @@ export function setup(ctx: SpindleFrontendContext) {
     if (payload?.type === "error") {
       const saveFailed = typeof payload.requestId === "string" && settingsDraft.fail(payload.requestId);
       const automaticSaveFailed = typeof payload.requestId === "string" && automaticSettingsDraft.fail(payload.requestId);
+      const lorebookSaveFailed = typeof payload.requestId === "string" && lorebookSelectionDraft.settle(payload.requestId);
+      if (lorebookSaveFailed) {
+        state = {
+          ...state,
+          selectedLorebookIds: lorebookSelectionDraft.overlay(state.chatId,
+            confirmedLorebookSelection.chatId === state.chatId ? confirmedLorebookSelection.ids : []),
+        };
+        syncLorebookSelectionUi();
+        requestState();
+      }
       const pendingEditor = typeof payload.requestId === "string" ? takePendingTextEditor(payload.requestId) : null;
       const trackerEditFailed = typeof payload.requestId === "string"
         && trackerEditSession?.requestId === payload.requestId;
       if (trackerEditFailed && trackerEditSession) trackerEditSession.requestId = null;
-      if (!saveFailed && !automaticSaveFailed && !pendingEditor && !trackerEditFailed) clearGenerationRequestPending();
+      if (!saveFailed && !automaticSaveFailed && !lorebookSaveFailed && !pendingEditor && !trackerEditFailed) clearGenerationRequestPending();
       syncSettingsDraftUi();
       renderChatToolbar();
       renderTopToolbarButton();
-      if (saveFailed || automaticSaveFailed) {
+      if (saveFailed || automaticSaveFailed || lorebookSaveFailed) {
         tabHandle?.activate();
         showSettingsError(payload.message);
       } else if (pendingEditor?.surface === "settings") {
@@ -322,6 +346,13 @@ export function setup(ctx: SpindleFrontendContext) {
   // would enqueue a duplicate state build for every normal chat response.
   const offEvents = [
     ctx.events.on("CHAT_SWITCHED", () => requestState()),
+    ctx.events.on("CHAT_CHANGED", () => requestState()),
+    ctx.events.on("CHARACTER_EDITED", () => requestState()),
+    ctx.events.on("PERSONA_CHANGED", () => requestState()),
+    ctx.events.on("SETTINGS_UPDATED", () => requestState()),
+    ctx.events.on("WORLD_BOOK_CHANGED", () => requestState()),
+    ctx.events.on("WORLD_BOOK_LIBRARY_CHANGED", () => requestState()),
+    ctx.events.on("WORLD_BOOK_DELETED", () => requestState()),
     ctx.events.on("MESSAGE_EDITED", () => requestState()),
     ctx.events.on("MESSAGE_DELETED", handleMessageDeleted),
     ctx.events.on("MESSAGE_SWIPED", () => requestState()),
@@ -380,6 +411,7 @@ export function setup(ctx: SpindleFrontendContext) {
     settingsDraft.reset();
     presetEditorDrafts.clear();
     automaticSettingsDraft.reset();
+    lorebookSelectionDraft.reset();
     pendingTextEditors.clear();
   };
 }
@@ -521,7 +553,11 @@ function settingsSurfaceHasActiveInteraction(): boolean {
 
 function settingsSurfaceStructureMatches(previous: SceneMapState, next: SceneMapState): boolean {
   return jsonValuesEqual(previous.settings, next.settings)
-    && jsonValuesEqual(previous.connections, next.connections);
+    && jsonValuesEqual(previous.connections, next.connections)
+    && previous.chatId === next.chatId
+    && jsonValuesEqual(previous.lorebookGroups, next.lorebookGroups)
+    && jsonValuesEqual(previous.selectedLorebookIds, next.selectedLorebookIds)
+    && previous.lorebookError === next.lorebookError;
 }
 
 function render(options: { preserveSettingsSurface?: boolean } = {}) {
@@ -827,6 +863,7 @@ function renderDrawerSettings() {
         </label>
       </div>
         </div>
+        ${renderLorebookPanel({ chatId: state.chatId, groups: state.lorebookGroups, selectedIds: state.selectedLorebookIds, error: state.lorebookError, loading: !hasReceivedInitialState })}
         <div class="scenemap-settings-group">
           <h3>Interface</h3>
           <label>
@@ -1790,6 +1827,10 @@ function ensureCurrentPresetLayoutValid(): boolean {
 
 function handleChange(event: Event) {
   const target = event.target as HTMLInputElement | HTMLSelectElement;
+  if (target instanceof HTMLInputElement && target.dataset.lorebookId) {
+    updateLorebookSelection(target.dataset.lorebookId, target.checked);
+    return;
+  }
   if (target.dataset.trackerEditControl) {
     updateTrackerEditControl(target);
     return;
@@ -1797,6 +1838,25 @@ function handleChange(event: Event) {
   const key = target.dataset.setting;
   if (!isAutomaticallySavedSetting(key)) return;
   updateSettingFromControl(target, key, true);
+}
+
+function updateLorebookSelection(bookId: string, enabled: boolean) {
+  if (!ctxRef || !state.chatId || !state.lorebookGroups.some((group) => group.books.some((book) => book.id === bookId))) return;
+  clearSettingsRuntimeError();
+  const requestId = `lorebook-selection-${++lorebookSelectionRequestSeq}`;
+  lorebookSelectionDraft.begin(requestId, state.chatId, bookId, enabled);
+  state = { ...state, selectedLorebookIds: lorebookSelectionDraft.overlay(state.chatId, state.selectedLorebookIds) };
+  syncLorebookSelectionUi();
+  ctxRef.sendToBackend({ type: "set_chat_lorebook", requestId, chatId: state.chatId, bookId, enabled });
+}
+
+function syncLorebookSelectionUi() {
+  const selected = new Set(state.selectedLorebookIds);
+  rootRef?.querySelectorAll<HTMLInputElement>("[data-lorebook-id]").forEach((input) => {
+    input.checked = selected.has(input.dataset.lorebookId ?? "");
+  });
+  const count = rootRef?.querySelector<HTMLElement>("[data-lorebook-count]");
+  if (count) count.textContent = `${countSelectedLorebooks(state.lorebookGroups, state.selectedLorebookIds)} selected`;
 }
 
 function handleInput(event: Event) {
@@ -3731,6 +3791,20 @@ const styles = `
 .scenemap-settings-group { border: 1px solid var(--lumiverse-border); background: var(--lumiverse-fill-subtle); border-radius: var(--lumiverse-radius, 8px); padding: 12px; }
 .scenemap-settings-group h3 { margin: 0 0 10px; color: var(--lumiverse-accent); font-size: 11px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
 .scenemap-settings-shell label { display: flex; flex-direction: column; gap: 5px; margin: 10px 0; font-size: 12px; color: var(--lumiverse-text-muted); }
+.scenemap-lorebook-count { flex: 0 0 auto; padding: 3px 7px; border: 1px solid var(--lumiverse-border); border-radius: 999px; color: var(--lumiverse-text-muted); font-size: 10px; font-weight: 600; }
+.scenemap-lorebook-hint { margin: 0 0 14px; color: var(--lumiverse-text-muted); font-size: 11px; line-height: 1.5; }
+.scenemap-lorebook-groups { display: grid; gap: 14px; }
+.scenemap-lorebook-group { min-width: 0; margin: 0; padding: 0; border: 0; }
+.scenemap-lorebook-group legend { display: flex; align-items: center; gap: 7px; width: 100%; padding: 0 0 7px; color: var(--lumiverse-text); font-size: 12px; font-weight: 650; }
+.scenemap-lorebook-group legend svg { flex: 0 0 auto; color: var(--lumiverse-primary-text, var(--lumiverse-accent)); }
+.scenemap-lorebook-source-count { margin-left: auto; color: var(--lumiverse-text-muted); font-size: 10px; font-weight: 500; }
+.scenemap-settings-shell .scenemap-lorebook-row { flex-direction: row; align-items: center; gap: 9px; margin: 4px 0 0; padding: 9px 10px; border: 1px solid var(--lumiverse-border); border-radius: var(--lumiverse-radius, 8px); background: var(--lumiverse-fill-subtle); color: var(--lumiverse-text); cursor: pointer; transition: border-color .15s, background .15s; }
+.scenemap-lorebook-row:hover { border-color: var(--lumiverse-border-hover, var(--lumiverse-accent)); background: var(--lumiverse-fill); }
+.scenemap-settings-shell .scenemap-lorebook-row:has(input:checked) { border-color: var(--lumiverse-primary-050, var(--lumiverse-accent)); background: var(--lumiverse-primary-015, color-mix(in srgb, var(--lumiverse-accent) 10%, transparent)); }
+.scenemap-lorebook-row input[type="checkbox"] { flex: 0 0 auto; width: 16px; height: 16px; margin: 0; accent-color: var(--lumiverse-primary, var(--lumiverse-accent)); cursor: pointer; }
+.scenemap-lorebook-row input:focus-visible { outline: 2px solid var(--lumiverse-primary, var(--lumiverse-accent)); outline-offset: 3px; }
+.scenemap-lorebook-row > span { min-width: 0; overflow-wrap: anywhere; line-height: 1.4; }
+.scenemap-lorebook-empty { margin: 0; padding: 5px 0; color: var(--lumiverse-text-muted); font-size: 11px; line-height: 1.5; }
 .scenemap-auto-row { display: flex; flex-direction: column; gap: 9px; border-top: 1px solid var(--lumiverse-border); border-bottom: 1px solid var(--lumiverse-border); padding: 9px 0; margin: 10px 0; }
 .scenemap-interval-field[hidden] { display: none; }
 .scenemap-sampler-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }

@@ -38,6 +38,8 @@ test("backend repairs raw Scrub All events, refreshes once, and restores the sce
       userStorage: { async getJson(_path, options) { return structuredClone(options.fallback); } },
       chats: { async getActive() { return { id: "chat-1", metadata: {} }; } },
       connections: { async list() { return []; } },
+      personas: { async getActive() { return null; }, async getDefault() { return null; } },
+      world_books: { async getGlobal() { return []; } },
       chat: {
         async getMessages() { reads++; return structuredClone(messages); },
         async updateMessage(chatId, messageId, patch) {

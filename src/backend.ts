@@ -34,6 +34,16 @@ import { raceWithAbort } from "./abortable";
 import { hasResolvableMacro } from "./macro-markers";
 import { WorldInfoActivationCache } from "./world-info-activation-cache";
 import {
+  getAllowedLorebookIds,
+  getSelectedLorebookIds,
+  readAttachedLorebookIds,
+  readLorebookGroups,
+  toggleLorebookSelection,
+  withLorebookSelection,
+  type LorebookGroup,
+  type LorebookReaders,
+} from "./lorebook-selection";
+import {
   applyTrackerFieldUpdates,
   collectRegeneratableFields,
   formatTrackerPath,
@@ -107,6 +117,7 @@ const worldInfoActivations = new WorldInfoActivationCache();
 // prevents slow storage/API calls from delivering stale acknowledgements last.
 const statePushQueue = new KeyedAsyncQueue();
 const settingsSaveQueue = new KeyedAsyncQueue();
+const chatMetadataSaveQueue = new KeyedAsyncQueue();
 const swipeTrackerRepairQueue = new KeyedAsyncQueue();
 const pendingSwipeTrackerRepairs = new Map<string, CollapsedSwipe[]>();
 const STATE_BUILD_TIMEOUT_MS = 10_000;
@@ -413,7 +424,7 @@ async function buildPromptReferenceValues(
   const [characterContext, persona, activeWorldInfo] = await Promise.all([
     buildCharacterContext(chat, userId, characterId),
     buildPersonaContext(chat, userId, characterId),
-    buildActiveWorldInfo(chat.id, userId, targetMessageId),
+    buildActiveWorldInfo(chat, userId, targetMessageId),
   ]);
   const characterReference = separatedReferenceBlock("{{char}}", [characterContext.character]);
   const personaReference = separatedReferenceBlock("{{user}}", [persona]);
@@ -470,18 +481,32 @@ async function buildPersonaContext(
   }
 }
 
+function lorebookReaders(userId?: string): LorebookReaders {
+  return {
+    getCharacter: (id) => spindle.characters.get(id, userId),
+    getPersona: async () => await spindle.personas.getActive(userId) ?? await spindle.personas.getDefault(userId),
+    getGlobal: () => spindle.world_books.getGlobal(userId),
+    getBook: (id) => spindle.world_books.get(id, userId),
+  };
+}
+
 async function buildActiveWorldInfo(
-  chatId: string,
-  userId: string,
-  targetMessageId: string,
+  chat: ActiveChat,
+  userId?: string,
+  targetMessageId?: string,
 ): Promise<string[]> {
+  const selectedIds = getSelectedLorebookIds(chat);
+  // Existing chats without a selection also start with every book unchecked.
+  if (!selectedIds.length) return [];
   try {
+    const allowedIds = getAllowedLorebookIds(selectedIds, await readAttachedLorebookIds(chat, lorebookReaders(userId)));
+    if (!allowedIds.size) return [];
     // Prefer the exact activation emitted for the generation that produced the
     // target reply. Manual/imported/ambiguous cases deliberately fall back to
     // Lumiverse's complete activation query for the current chat.
-    let entryIds = worldInfoActivations.get(userId, chatId, targetMessageId);
+    let entryIds = userId && targetMessageId ? worldInfoActivations.get(userId, chat.id, targetMessageId) : null;
     if (entryIds === null) {
-      const activated = await spindle.world_books.getActivated(chatId, userId);
+      const activated = await spindle.world_books.getActivated(chat.id, userId);
       entryIds = activated.map((entry) => entry.id);
     }
     if (!entryIds.length) return [];
@@ -489,6 +514,7 @@ async function buildActiveWorldInfo(
     const entries = await Promise.all(entryIds.map(async (entryId) => {
       try {
         const fullEntry = await spindle.world_books.entries.get(entryId, userId);
+        if (!fullEntry || fullEntry.disabled || !allowedIds.has(fullEntry.world_book_id)) return "";
         return compactText(fullEntry?.content);
       } catch (error) {
         spindle.log.warn(`SceneMap could not read active world info entry ${entryId}: ${(error as Error).message}`);
@@ -656,6 +682,16 @@ async function buildState(userId: string): Promise<SceneMapState> {
     }
   }
   const connections = await getStateConnections(userId);
+  let lorebookGroups: LorebookGroup[] = [];
+  let lorebookError: string | null = null;
+  if (chat) {
+    try {
+      lorebookGroups = await readLorebookGroups(chat, lorebookReaders(userId));
+    } catch (error) {
+      lorebookError = `Could not load this chat's lorebooks: ${(error as Error).message}`;
+      spindle.log.warn(`SceneMap ${lorebookError}`);
+    }
+  }
   // Read generation state after every slow RPC. Otherwise an old state build
   // can publish "active" after the generation has already completed.
   const activeGeneration = activeGenerations.get(userId);
@@ -671,6 +707,9 @@ async function buildState(userId: string): Promise<SceneMapState> {
     generationActive: activeGeneration !== null,
     generatingMessageId: activeGeneration?.messageId ?? null,
     connections,
+    lorebookGroups,
+    selectedLorebookIds: getSelectedLorebookIds(chat),
+    lorebookError,
   };
 }
 
@@ -797,15 +836,8 @@ async function resolveRegisteredPromptMacro(context: SceneMapMacroContext): Prom
 
 async function buildCurrentActiveWorldInfo(chatId: string): Promise<string[]> {
   try {
-    const activated = await spindle.world_books.getActivated(chatId);
-    const entries = await Promise.all(activated.map(async (entry) => {
-      try {
-        return compactText((await spindle.world_books.entries.get(entry.id))?.content);
-      } catch {
-        return "";
-      }
-    }));
-    return entries.filter(Boolean);
+    const chat = await spindle.chats.get(chatId) as ActiveChat | null;
+    return chat ? await buildActiveWorldInfo(chat) : [];
   } catch {
     return [];
   }
@@ -841,6 +873,27 @@ async function updateChatPreset(chatId: string, presetKey: string, userId: strin
       },
     },
   }, userId);
+}
+
+async function setChatLorebook(chatId: unknown, bookId: unknown, enabled: unknown, userId: string) {
+  if (typeof chatId !== "string" || !chatId || typeof bookId !== "string" || !bookId || typeof enabled !== "boolean") {
+    throw new Error("The lorebook selection is invalid.");
+  }
+  await chatMetadataSaveQueue.enqueue(userId, async () => {
+    // Use the requested chat, even if the user switched chats while saving.
+    const chat = await spindle.chats.get(chatId, userId);
+    if (!chat) throw new Error("The lorebook's chat is no longer available.");
+    if (enabled) {
+      const sources = await readAttachedLorebookIds(chat, lorebookReaders(userId));
+      if (!getAllowedLorebookIds([bookId], sources).has(bookId)) {
+        throw new Error("This lorebook is no longer attached to the chat.");
+      }
+    }
+    const current = await spindle.chats.get(chatId, userId);
+    if (!current) throw new Error("The lorebook's chat is no longer available.");
+    const selected = toggleLorebookSelection(getSelectedLorebookIds(current), bookId, enabled);
+    await spindle.chats.update(chatId, { metadata: withLorebookSelection(current, selected) }, userId);
+  });
 }
 
 function getChatPresetKey(chat: { metadata?: Record<string, unknown> } | null, settings: SceneMapSettings): string {
@@ -937,6 +990,7 @@ async function regenerateTrackerFields(
   userId?: string,
 ) {
   if (!userId) throw new Error("SceneMap needs a user context before regenerating tracker fields.");
+  await chatMetadataSaveQueue.enqueue(userId, async () => {});
   if (typeof messageId !== "string" || !messageId) throw new Error("The tracker message is missing.");
   if (!Number.isSafeInteger(swipeId) || (swipeId as number) < 0) throw new Error("The tracker swipe is invalid.");
   const paths = normalizeTrackerPaths(rawPaths);
@@ -1102,6 +1156,7 @@ async function regenerateTrackerFields(
 
 async function generateTracker(userId?: string, expectedLatestMessageId?: string) {
   if (!userId) throw new Error("SceneMap needs a user context before generating a tracker.");
+  await chatMetadataSaveQueue.enqueue(userId, async () => {});
   const activeGeneration = activeGenerations.get(userId);
   if (activeGeneration) {
     // Starts are idempotent. Cancellation has its own command so a delayed or
@@ -1437,11 +1492,17 @@ spindle.onFrontendMessage(async (payload: any, userId?: string) => {
       case "set_chat_preset": {
         const { chat } = await getActiveContext(userId);
         if (!chat) throw new Error("Open a chat before setting a chat preset.");
-        await updateChatPreset(chat.id, payload.presetKey, userId);
+        await chatMetadataSaveQueue.enqueue(userId, () => updateChatPreset(chat.id, payload.presetKey, userId));
         await pushState(userId);
         spindle.toast.success("Chat preset updated.", { title: "SceneMap", userId });
         break;
       }
+      case "set_chat_lorebook":
+        await setChatLorebook(payload.chatId, payload.bookId, payload.enabled, userId);
+        await pushState(userId, {
+          lorebookSelectionRequestId: typeof payload.requestId === "string" ? payload.requestId : "",
+        });
+        break;
       case "generate_tracker":
         await generateTracker(userId);
         break;

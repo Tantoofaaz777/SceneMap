@@ -1,11 +1,11 @@
 // @bun
 // src/prompt-templates.ts
 var SCENEMAP_PROMPT_MACROS = [
-  { token: "{{scenemap_context}}", description: "Character, persona, scenario and active World Info, with separators." },
+  { token: "{{scenemap_context}}", description: "Character, persona, scenario and activated entries from this chat's selected lorebooks, with separators." },
   { token: "{{scenemap_character}}", description: "Character description and personality." },
   { token: "{{scenemap_persona}}", description: "Active persona description." },
   { token: "{{scenemap_scenario}}", description: "Character scenario." },
-  { token: "{{scenemap_world_info}}", description: "Active World Book entries." },
+  { token: "{{scenemap_world_info}}", description: "Activated entries from the lorebooks selected for SceneMap in this chat." },
   { token: "{{scenemap_chat_history::N}}", description: "Last N messages in chronological order, separated by a blank line. Omit ::N for all." },
   { token: "{{scenemap_schema}}", description: "Configured tracker schema." },
   { token: "{{scenemap_response_schema}}", description: "Schema expected for this operation, including partial regeneration." },
@@ -2266,6 +2266,80 @@ function scopeKey(userId, chatId) {
   return JSON.stringify([userId, chatId]);
 }
 
+// src/lorebook-selection.ts
+var LOREBOOK_SOURCES = ["character", "persona", "chat", "global"];
+function normalizeLorebookIds(value) {
+  if (!Array.isArray(value))
+    return [];
+  return [...new Set(value.flatMap((id) => typeof id === "string" && id.trim() ? [id.trim()] : []))];
+}
+function record2(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+function getSelectedLorebookIds(chat) {
+  return normalizeLorebookIds(record2(chat?.metadata?.scenemap).selectedLorebookIds);
+}
+function toggleLorebookSelection(ids, bookId, enabled) {
+  return enabled ? normalizeLorebookIds([...ids, bookId]) : ids.filter((id) => id !== bookId);
+}
+function withLorebookSelection(chat, selectedIds) {
+  return {
+    ...chat.metadata,
+    scenemap: { ...record2(chat.metadata?.scenemap), selectedLorebookIds: normalizeLorebookIds(selectedIds) }
+  };
+}
+function getLorebookCharacterIds(chat) {
+  const primary = normalizeLorebookIds([chat.character_id]);
+  const meta = chat.metadata ?? {};
+  if (meta.group !== true && meta.group !== 1)
+    return primary;
+  const explicitMode = meta.group_lorebook_mode;
+  const mode = explicitMode === "all" || explicitMode === "all_unmuted" || explicitMode === "active_character" ? explicitMode : meta.group_card_mode === "merge" ? "all" : meta.group_card_mode === "merge_ignore_muted" ? "all_unmuted" : "active_character";
+  if (mode === "active_character")
+    return primary;
+  const muted = new Set(mode === "all_unmuted" ? normalizeLorebookIds(meta.muted_character_ids) : []);
+  const ids = normalizeLorebookIds(meta.character_ids).filter((id) => !muted.has(id));
+  return ids.length ? ids : primary;
+}
+async function readAttachedLorebookIds(chat, readers) {
+  const characterBooks = [];
+  for (const id of getLorebookCharacterIds(chat)) {
+    const character = await readers.getCharacter(id);
+    if (!character)
+      continue;
+    const rawIds = character.world_book_ids ?? character.extensions?.world_book_ids;
+    characterBooks.push(...normalizeLorebookIds(Array.isArray(rawIds) ? rawIds : [character.extensions?.world_book_id]));
+  }
+  const persona = await readers.getPersona();
+  return {
+    character: normalizeLorebookIds(characterBooks),
+    persona: normalizeLorebookIds([persona?.attached_world_book_id]),
+    chat: normalizeLorebookIds(chat.metadata?.chat_world_book_ids),
+    global: normalizeLorebookIds(await readers.getGlobal())
+  };
+}
+async function readLorebookGroups(chat, readers) {
+  const sources = await readAttachedLorebookIds(chat, readers);
+  const books = new Map;
+  const groups = [];
+  for (const source of LOREBOOK_SOURCES) {
+    const group = { source, books: [] };
+    for (const id of sources[source]) {
+      if (!books.has(id))
+        books.set(id, await readers.getBook(id));
+      const book = books.get(id);
+      if (book)
+        group.books.push({ id: book.id, name: book.name });
+    }
+    groups.push(group);
+  }
+  return groups;
+}
+function getAllowedLorebookIds(selectedIds, sources) {
+  const attached = new Set(LOREBOOK_SOURCES.flatMap((source) => sources[source]));
+  return new Set(selectedIds.filter((id) => attached.has(id)));
+}
+
 // src/partial-regeneration.ts
 var forbiddenPathSegments = new Set(["__proto__", "prototype", "constructor"]);
 var MAX_SELECTED_FIELDS = 50;
@@ -2512,6 +2586,7 @@ var activeGenerations = new GenerationRegistry;
 var worldInfoActivations = new WorldInfoActivationCache;
 var statePushQueue = new KeyedAsyncQueue;
 var settingsSaveQueue = new KeyedAsyncQueue;
+var chatMetadataSaveQueue = new KeyedAsyncQueue;
 var swipeTrackerRepairQueue = new KeyedAsyncQueue;
 var pendingSwipeTrackerRepairs = new Map;
 var STATE_BUILD_TIMEOUT_MS = 1e4;
@@ -2745,7 +2820,7 @@ async function buildPromptReferenceValues(chat, userId, characterId, targetMessa
   const [characterContext, persona, activeWorldInfo] = await Promise.all([
     buildCharacterContext(chat, userId, characterId),
     buildPersonaContext(chat, userId, characterId),
-    buildActiveWorldInfo(chat.id, userId, targetMessageId)
+    buildActiveWorldInfo(chat, userId, targetMessageId)
   ]);
   const characterReference = separatedReferenceBlock("{{char}}", [characterContext.character]);
   const personaReference = separatedReferenceBlock("{{user}}", [persona]);
@@ -2798,11 +2873,25 @@ async function buildPersonaContext(chat, userId, characterId) {
     return "";
   }
 }
-async function buildActiveWorldInfo(chatId, userId, targetMessageId) {
+function lorebookReaders(userId) {
+  return {
+    getCharacter: (id) => spindle.characters.get(id, userId),
+    getPersona: async () => await spindle.personas.getActive(userId) ?? await spindle.personas.getDefault(userId),
+    getGlobal: () => spindle.world_books.getGlobal(userId),
+    getBook: (id) => spindle.world_books.get(id, userId)
+  };
+}
+async function buildActiveWorldInfo(chat, userId, targetMessageId) {
+  const selectedIds = getSelectedLorebookIds(chat);
+  if (!selectedIds.length)
+    return [];
   try {
-    let entryIds = worldInfoActivations.get(userId, chatId, targetMessageId);
+    const allowedIds = getAllowedLorebookIds(selectedIds, await readAttachedLorebookIds(chat, lorebookReaders(userId)));
+    if (!allowedIds.size)
+      return [];
+    let entryIds = userId && targetMessageId ? worldInfoActivations.get(userId, chat.id, targetMessageId) : null;
     if (entryIds === null) {
-      const activated = await spindle.world_books.getActivated(chatId, userId);
+      const activated = await spindle.world_books.getActivated(chat.id, userId);
       entryIds = activated.map((entry) => entry.id);
     }
     if (!entryIds.length)
@@ -2810,6 +2899,8 @@ async function buildActiveWorldInfo(chatId, userId, targetMessageId) {
     const entries = await Promise.all(entryIds.map(async (entryId) => {
       try {
         const fullEntry = await spindle.world_books.entries.get(entryId, userId);
+        if (!fullEntry || fullEntry.disabled || !allowedIds.has(fullEntry.world_book_id))
+          return "";
         return compactText(fullEntry?.content);
       } catch (error) {
         spindle.log.warn(`SceneMap could not read active world info entry ${entryId}: ${error.message}`);
@@ -2946,6 +3037,16 @@ async function buildState(userId) {
     }
   }
   const connections = await getStateConnections(userId);
+  let lorebookGroups = [];
+  let lorebookError = null;
+  if (chat) {
+    try {
+      lorebookGroups = await readLorebookGroups(chat, lorebookReaders(userId));
+    } catch (error) {
+      lorebookError = `Could not load this chat's lorebooks: ${error.message}`;
+      spindle.log.warn(`SceneMap ${lorebookError}`);
+    }
+  }
   const activeGeneration = activeGenerations.get(userId);
   return {
     settings,
@@ -2958,7 +3059,10 @@ async function buildState(userId) {
     activeSwipeId: activeMessage ? getActiveSwipeId(activeMessage) : null,
     generationActive: activeGeneration !== null,
     generatingMessageId: activeGeneration?.messageId ?? null,
-    connections
+    connections,
+    lorebookGroups,
+    selectedLorebookIds: getSelectedLorebookIds(chat),
+    lorebookError
   };
 }
 function pushState(userId, response = {}) {
@@ -3070,15 +3174,8 @@ ${exampleResponse}
 }
 async function buildCurrentActiveWorldInfo(chatId) {
   try {
-    const activated = await spindle.world_books.getActivated(chatId);
-    const entries = await Promise.all(activated.map(async (entry) => {
-      try {
-        return compactText((await spindle.world_books.entries.get(entry.id))?.content);
-      } catch {
-        return "";
-      }
-    }));
-    return entries.filter(Boolean);
+    const chat = await spindle.chats.get(chatId);
+    return chat ? await buildActiveWorldInfo(chat) : [];
   } catch {
     return [];
   }
@@ -3113,6 +3210,27 @@ async function updateChatPreset(chatId, presetKey, userId) {
       }
     }
   }, userId);
+}
+async function setChatLorebook(chatId, bookId, enabled, userId) {
+  if (typeof chatId !== "string" || !chatId || typeof bookId !== "string" || !bookId || typeof enabled !== "boolean") {
+    throw new Error("The lorebook selection is invalid.");
+  }
+  await chatMetadataSaveQueue.enqueue(userId, async () => {
+    const chat = await spindle.chats.get(chatId, userId);
+    if (!chat)
+      throw new Error("The lorebook's chat is no longer available.");
+    if (enabled) {
+      const sources = await readAttachedLorebookIds(chat, lorebookReaders(userId));
+      if (!getAllowedLorebookIds([bookId], sources).has(bookId)) {
+        throw new Error("This lorebook is no longer attached to the chat.");
+      }
+    }
+    const current = await spindle.chats.get(chatId, userId);
+    if (!current)
+      throw new Error("The lorebook's chat is no longer available.");
+    const selected = toggleLorebookSelection(getSelectedLorebookIds(current), bookId, enabled);
+    await spindle.chats.update(chatId, { metadata: withLorebookSelection(current, selected) }, userId);
+  });
 }
 function getChatPresetKey(chat, settings) {
   const meta = chat?.metadata?.[CHAT_METADATA_KEY];
@@ -3183,6 +3301,7 @@ function buildPartialRegenerationTask(tracker, selectedFields, responseSchema, f
 async function regenerateTrackerFields(messageId, swipeId, rawPaths, rawFeedback, userId) {
   if (!userId)
     throw new Error("SceneMap needs a user context before regenerating tracker fields.");
+  await chatMetadataSaveQueue.enqueue(userId, async () => {});
   if (typeof messageId !== "string" || !messageId)
     throw new Error("The tracker message is missing.");
   if (!Number.isSafeInteger(swipeId) || swipeId < 0)
@@ -3319,6 +3438,7 @@ ${exampleResponse}
 async function generateTracker(userId, expectedLatestMessageId) {
   if (!userId)
     throw new Error("SceneMap needs a user context before generating a tracker.");
+  await chatMetadataSaveQueue.enqueue(userId, async () => {});
   const activeGeneration = activeGenerations.get(userId);
   if (activeGeneration) {
     sendGenerationStatus(userId);
@@ -3596,11 +3716,17 @@ spindle.onFrontendMessage(async (payload, userId) => {
         const { chat } = await getActiveContext(userId);
         if (!chat)
           throw new Error("Open a chat before setting a chat preset.");
-        await updateChatPreset(chat.id, payload.presetKey, userId);
+        await chatMetadataSaveQueue.enqueue(userId, () => updateChatPreset(chat.id, payload.presetKey, userId));
         await pushState(userId);
         spindle.toast.success("Chat preset updated.", { title: "SceneMap", userId });
         break;
       }
+      case "set_chat_lorebook":
+        await setChatLorebook(payload.chatId, payload.bookId, payload.enabled, userId);
+        await pushState(userId, {
+          lorebookSelectionRequestId: typeof payload.requestId === "string" ? payload.requestId : ""
+        });
+        break;
       case "generate_tracker":
         await generateTracker(userId);
         break;

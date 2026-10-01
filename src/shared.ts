@@ -1,4 +1,5 @@
 import { chatHistoryMacro } from "./prompt-templates";
+import type { LorebookGroup } from "./lorebook-selection";
 
 export const EXTENSION_KEY = "SceneMap";
 export const SETTINGS_PATH = "settings.json";
@@ -75,6 +76,9 @@ export interface SceneMapState {
   generationActive: boolean;
   generatingMessageId: string | null;
   connections: Array<{ id: string; name: string; provider: string; model: string; is_default?: boolean }>;
+  lorebookGroups: LorebookGroup[];
+  selectedLorebookIds: string[];
+  lorebookError: string | null;
 }
 
 export const DEFAULT_SCHEMA_VALUE: Record<string, unknown> = {

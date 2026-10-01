@@ -21,8 +21,8 @@ function ownKeys(e, r) {
   var t = Object.keys(e);
   if (Object.getOwnPropertySymbols) {
     var o = Object.getOwnPropertySymbols(e);
-    r && (o = o.filter(function(r2) {
-      return Object.getOwnPropertyDescriptor(e, r2).enumerable;
+    r && (o = o.filter(function(r) {
+      return Object.getOwnPropertyDescriptor(e, r).enumerable;
     })), t.push.apply(t, o);
   }
   return t;
@@ -30,10 +30,10 @@ function ownKeys(e, r) {
 function _objectSpread2(e) {
   for (var r = 1;r < arguments.length; r++) {
     var t = arguments[r] != null ? arguments[r] : {};
-    r % 2 ? ownKeys(Object(t), true).forEach(function(r2) {
-      _defineProperty(e, r2, t[r2]);
-    }) : Object.getOwnPropertyDescriptors ? Object.defineProperties(e, Object.getOwnPropertyDescriptors(t)) : ownKeys(Object(t)).forEach(function(r2) {
-      Object.defineProperty(e, r2, Object.getOwnPropertyDescriptor(t, r2));
+    r % 2 ? ownKeys(Object(t), true).forEach(function(r) {
+      _defineProperty(e, r, t[r]);
+    }) : Object.getOwnPropertyDescriptors ? Object.defineProperties(e, Object.getOwnPropertyDescriptors(t)) : ownKeys(Object(t)).forEach(function(r) {
+      Object.defineProperty(e, r, Object.getOwnPropertyDescriptor(t, r));
     });
   }
   return e;
@@ -79,10 +79,10 @@ function _toPropertyKey(t) {
 }
 function _typeof(o) {
   "@babel/helpers - typeof";
-  return _typeof = typeof Symbol == "function" && typeof Symbol.iterator == "symbol" ? function(o2) {
-    return typeof o2;
-  } : function(o2) {
-    return o2 && typeof Symbol == "function" && o2.constructor === Symbol && o2 !== Symbol.prototype ? "symbol" : typeof o2;
+  return _typeof = typeof Symbol == "function" && typeof Symbol.iterator == "symbol" ? function(o) {
+    return typeof o;
+  } : function(o) {
+    return o && typeof Symbol == "function" && o.constructor === Symbol && o !== Symbol.prototype ? "symbol" : typeof o;
   }, _typeof(o);
 }
 var version = "1.15.7";
@@ -299,22 +299,22 @@ function lastChild(el, selector) {
   return last || null;
 }
 function index(el, selector) {
-  var index2 = 0;
+  var index = 0;
   if (!el || !el.parentNode) {
     return -1;
   }
   while (el = el.previousElementSibling) {
     if (el.nodeName.toUpperCase() !== "TEMPLATE" && el !== Sortable.clone && (!selector || matches(el, selector))) {
-      index2++;
+      index++;
     }
   }
-  return index2;
+  return index;
 }
 function getRelativeScrollOffset(el) {
   var offsetLeft = 0, offsetTop = 0, winScroller = getWindowScrollingElement();
   if (el) {
     do {
-      var elMatrix = matrix(el), scaleX = elMatrix.a, scaleY = elMatrix.d;
+      var elMatrix = matrix(el), { a: scaleX, d: scaleY } = elMatrix;
       offsetLeft += el.scrollLeft * scaleX;
       offsetTop += el.scrollTop * scaleY;
     } while (el !== winScroller && (el = el.parentNode));
@@ -462,7 +462,7 @@ function AnimationStateManager() {
       }
       var animating = false, animationTime = 0;
       animationStates.forEach(function(state) {
-        var time = 0, target = state.target, fromRect = target.fromRect, toRect = getRect(target), prevFromRect = target.prevFromRect, prevToRect = target.prevToRect, animatingRect = state.rect, targetMatrix = matrix(target, true);
+        var time = 0, target = state.target, fromRect = target.fromRect, toRect = getRect(target), { prevFromRect, prevToRect } = target, animatingRect = state.rect, targetMatrix = matrix(target, true);
         if (targetMatrix) {
           toRect.top -= targetMatrix.f;
           toRect.left -= targetMatrix.e;
@@ -576,7 +576,7 @@ var PluginManager = {
       }
     });
   },
-  initializePlugins: function initializePlugins(sortable, el, defaults2, options) {
+  initializePlugins: function initializePlugins(sortable, el, defaults, options) {
     plugins.forEach(function(plugin) {
       var pluginName = plugin.pluginName;
       if (!sortable.options[pluginName] && !plugin.initializeByDefault)
@@ -585,7 +585,7 @@ var PluginManager = {
       initialized.sortable = sortable;
       initialized.options = sortable.options;
       sortable[pluginName] = initialized;
-      _extends(defaults2, initialized.defaults);
+      _extends(defaults, initialized.defaults);
     });
     for (var option in sortable.options) {
       if (!sortable.options.hasOwnProperty(option))
@@ -654,7 +654,7 @@ function dispatchEvent(_ref) {
   }
 }
 var _excluded = ["evt"];
-var pluginEvent2 = function pluginEvent3(eventName, sortable) {
+var pluginEvent = function pluginEvent(eventName, sortable) {
   var _ref = arguments.length > 2 && arguments[2] !== undefined ? arguments[2] : {}, originalEvent = _ref.evt, data = _objectWithoutProperties(_ref, _excluded);
   PluginManager.pluginEvent.bind(Sortable)(eventName, sortable, _objectSpread2({
     dragEl,
@@ -749,7 +749,7 @@ var supportCssPointerEvents = function() {
   el.style.cssText = "pointer-events:auto";
   return el.style.pointerEvents === "auto";
 }();
-var _detectDirection = function _detectDirection2(el, options) {
+var _detectDirection = function _detectDirection(el, options) {
   var elCSS = css(el), elWidth = parseInt(elCSS.width) - parseInt(elCSS.paddingLeft) - parseInt(elCSS.paddingRight) - parseInt(elCSS.borderLeftWidth) - parseInt(elCSS.borderRightWidth), child1 = getChild(el, 0, options), child2 = getChild(el, 1, options), firstChildCSS = child1 && css(child1), secondChildCSS = child2 && css(child2), firstChildWidth = firstChildCSS && parseInt(firstChildCSS.marginLeft) + parseInt(firstChildCSS.marginRight) + getRect(child1).width, secondChildWidth = secondChildCSS && parseInt(secondChildCSS.marginLeft) + parseInt(secondChildCSS.marginRight) + getRect(child2).width;
   if (elCSS.display === "flex") {
     return elCSS.flexDirection === "column" || elCSS.flexDirection === "column-reverse" ? "vertical" : "horizontal";
@@ -763,11 +763,11 @@ var _detectDirection = function _detectDirection2(el, options) {
   }
   return child1 && (firstChildCSS.display === "block" || firstChildCSS.display === "flex" || firstChildCSS.display === "table" || firstChildCSS.display === "grid" || firstChildWidth >= elWidth && elCSS[CSSFloatProperty] === "none" || child2 && elCSS[CSSFloatProperty] === "none" && firstChildWidth + secondChildWidth > elWidth) ? "vertical" : "horizontal";
 };
-var _dragElInRowColumn = function _dragElInRowColumn2(dragRect, targetRect, vertical) {
+var _dragElInRowColumn = function _dragElInRowColumn(dragRect, targetRect, vertical) {
   var dragElS1Opp = vertical ? dragRect.left : dragRect.top, dragElS2Opp = vertical ? dragRect.right : dragRect.bottom, dragElOppLength = vertical ? dragRect.width : dragRect.height, targetS1Opp = vertical ? targetRect.left : targetRect.top, targetS2Opp = vertical ? targetRect.right : targetRect.bottom, targetOppLength = vertical ? targetRect.width : targetRect.height;
   return dragElS1Opp === targetS1Opp || dragElS2Opp === targetS2Opp || dragElS1Opp + dragElOppLength / 2 === targetS1Opp + targetOppLength / 2;
 };
-var _detectNearestEmptySortable = function _detectNearestEmptySortable2(x, y) {
+var _detectNearestEmptySortable = function _detectNearestEmptySortable(x, y) {
   var ret;
   sortables.some(function(sortable) {
     var threshold = sortable[expando].options.emptyInsertThreshold;
@@ -780,9 +780,9 @@ var _detectNearestEmptySortable = function _detectNearestEmptySortable2(x, y) {
   });
   return ret;
 };
-var _prepareGroup = function _prepareGroup2(options) {
+var _prepareGroup = function _prepareGroup(options) {
   function toFn(value, pull) {
-    return function(to, from, dragEl2, evt) {
+    return function(to, from, dragEl, evt) {
       var sameGroup = to.options.group.name && from.options.group.name && to.options.group.name === from.options.group.name;
       if (value == null && (pull || sameGroup)) {
         return true;
@@ -791,7 +791,7 @@ var _prepareGroup = function _prepareGroup2(options) {
       } else if (pull && value === "clone") {
         return value;
       } else if (typeof value === "function") {
-        return toFn(value(to, from, dragEl2, evt), pull)(to, from, dragEl2, evt);
+        return toFn(value(to, from, dragEl, evt), pull)(to, from, dragEl, evt);
       } else {
         var otherGroup = (pull ? to : from).options.group.name;
         return value === true || typeof value === "string" && value === otherGroup || value.join && value.indexOf(otherGroup) > -1;
@@ -811,12 +811,12 @@ var _prepareGroup = function _prepareGroup2(options) {
   group.revertClone = originalGroup.revertClone;
   options.group = group;
 };
-var _hideGhostForTarget = function _hideGhostForTarget2() {
+var _hideGhostForTarget = function _hideGhostForTarget() {
   if (!supportCssPointerEvents && ghostEl) {
     css(ghostEl, "display", "none");
   }
 };
-var _unhideGhostForTarget = function _unhideGhostForTarget2() {
+var _unhideGhostForTarget = function _unhideGhostForTarget() {
   if (!supportCssPointerEvents && ghostEl) {
     css(ghostEl, "display", "");
   }
@@ -832,7 +832,7 @@ if (documentExists && !ChromeForAndroid) {
     }
   }, true);
 }
-var nearestEmptyInsertDetectEvent = function nearestEmptyInsertDetectEvent2(evt) {
+var nearestEmptyInsertDetectEvent = function nearestEmptyInsertDetectEvent(evt) {
   if (dragEl) {
     evt = evt.touches ? evt.touches[0] : evt;
     var nearest = _detectNearestEmptySortable(evt.clientX, evt.clientY);
@@ -850,7 +850,7 @@ var nearestEmptyInsertDetectEvent = function nearestEmptyInsertDetectEvent2(evt)
     }
   }
 };
-var _checkOutsideTargetEl = function _checkOutsideTargetEl2(evt) {
+var _checkOutsideTargetEl = function _checkOutsideTargetEl(evt) {
   if (dragEl) {
     dragEl.parentNode[expando]._isOutsideThisEl(evt.target);
   }
@@ -862,7 +862,7 @@ function Sortable(el, options) {
   this.el = el;
   this.options = options = _extends({}, options);
   el[expando] = this;
-  var defaults2 = {
+  var defaults = {
     group: null,
     sort: true,
     disabled: false,
@@ -884,8 +884,8 @@ function Sortable(el, options) {
     preventOnFilter: true,
     animation: 0,
     easing: null,
-    setData: function setData(dataTransfer, dragEl2) {
-      dataTransfer.setData("Text", dragEl2.textContent);
+    setData: function setData(dataTransfer, dragEl) {
+      dataTransfer.setData("Text", dragEl.textContent);
     },
     dropBubble: false,
     dragoverBubble: false,
@@ -904,9 +904,9 @@ function Sortable(el, options) {
     supportPointer: Sortable.supportPointer !== false && "PointerEvent" in window && (!Safari || IOS),
     emptyInsertThreshold: 5
   };
-  PluginManager.initializePlugins(this, el, defaults2);
-  for (var name in defaults2) {
-    !(name in options) && (options[name] = defaults2[name]);
+  PluginManager.initializePlugins(this, el, defaults);
+  for (var name in defaults) {
+    !(name in options) && (options[name] = defaults[name]);
   }
   _prepareGroup(options);
   for (var fn in this) {
@@ -978,7 +978,7 @@ Sortable.prototype = {
           toEl: el,
           fromEl: el
         });
-        pluginEvent2("filter", _this, {
+        pluginEvent("filter", _this, {
           evt
         });
         preventOnFilter && evt.preventDefault();
@@ -996,7 +996,7 @@ Sortable.prototype = {
             fromEl: el,
             toEl: el
           });
-          pluginEvent2("filter", _this, {
+          pluginEvent("filter", _this, {
             evt
           });
           return true;
@@ -1013,7 +1013,7 @@ Sortable.prototype = {
     this._prepareDragStart(evt, touch, target);
   },
   _prepareDragStart: function _prepareDragStart(evt, touch, target) {
-    var _this = this, el = _this.el, options = _this.options, ownerDocument = el.ownerDocument, dragStartFn;
+    var _this = this, { el, options } = _this, ownerDocument = el.ownerDocument, dragStartFn;
     if (target && !dragEl && target.parentNode === el) {
       var dragRect = getRect(target);
       rootEl = el;
@@ -1033,8 +1033,8 @@ Sortable.prototype = {
       this._lastX = (touch || evt).clientX;
       this._lastY = (touch || evt).clientY;
       dragEl.style["will-change"] = "all";
-      dragStartFn = function dragStartFn2() {
-        pluginEvent2("delayEnded", _this, {
+      dragStartFn = function dragStartFn() {
+        pluginEvent("delayEnded", _this, {
           evt
         });
         if (Sortable.eventCanceled) {
@@ -1071,7 +1071,7 @@ Sortable.prototype = {
         this.options.touchStartThreshold = 4;
         dragEl.draggable = true;
       }
-      pluginEvent2("delayStart", this, {
+      pluginEvent("delayStart", this, {
         evt
       });
       if (options.delay && (!options.delayOnTouchOnly || touch) && (!this.nativeDraggable || !(Edge || IE11OrLess))) {
@@ -1145,7 +1145,7 @@ Sortable.prototype = {
   _dragStarted: function _dragStarted(fallback, evt) {
     awaitingDragStarted = false;
     if (rootEl && dragEl) {
-      pluginEvent2("dragStarted", this, {
+      pluginEvent("dragStarted", this, {
         evt
       });
       if (this.nativeDraggable) {
@@ -1201,7 +1201,7 @@ Sortable.prototype = {
   },
   _onTouchMove: function _onTouchMove(evt) {
     if (tapEvt) {
-      var options = this.options, fallbackTolerance = options.fallbackTolerance, fallbackOffset = options.fallbackOffset, touch = evt.touches ? evt.touches[0] : evt, ghostMatrix = ghostEl && matrix(ghostEl, true), scaleX = ghostEl && ghostMatrix && ghostMatrix.a, scaleY = ghostEl && ghostMatrix && ghostMatrix.d, relativeScrollOffset = PositionGhostAbsolutely && ghostRelativeParent && getRelativeScrollOffset(ghostRelativeParent), dx = (touch.clientX - tapEvt.clientX + fallbackOffset.x) / (scaleX || 1) + (relativeScrollOffset ? relativeScrollOffset[0] - ghostRelativeParentInitialScroll[0] : 0) / (scaleX || 1), dy = (touch.clientY - tapEvt.clientY + fallbackOffset.y) / (scaleY || 1) + (relativeScrollOffset ? relativeScrollOffset[1] - ghostRelativeParentInitialScroll[1] : 0) / (scaleY || 1);
+      var options = this.options, { fallbackTolerance, fallbackOffset } = options, touch = evt.touches ? evt.touches[0] : evt, ghostMatrix = ghostEl && matrix(ghostEl, true), scaleX = ghostEl && ghostMatrix && ghostMatrix.a, scaleY = ghostEl && ghostMatrix && ghostMatrix.d, relativeScrollOffset = PositionGhostAbsolutely && ghostRelativeParent && getRelativeScrollOffset(ghostRelativeParent), dx = (touch.clientX - tapEvt.clientX + fallbackOffset.x) / (scaleX || 1) + (relativeScrollOffset ? relativeScrollOffset[0] - ghostRelativeParentInitialScroll[0] : 0) / (scaleX || 1), dy = (touch.clientY - tapEvt.clientY + fallbackOffset.y) / (scaleY || 1) + (relativeScrollOffset ? relativeScrollOffset[1] - ghostRelativeParentInitialScroll[1] : 0) / (scaleY || 1);
       if (!Sortable.active && !awaitingDragStarted) {
         if (fallbackTolerance && Math.max(Math.abs(touch.clientX - this._lastX), Math.abs(touch.clientY - this._lastY)) < fallbackTolerance) {
           return;
@@ -1277,14 +1277,14 @@ Sortable.prototype = {
     var _this = this;
     var dataTransfer = evt.dataTransfer;
     var options = _this.options;
-    pluginEvent2("dragStart", this, {
+    pluginEvent("dragStart", this, {
       evt
     });
     if (Sortable.eventCanceled) {
       this._onDrop();
       return;
     }
-    pluginEvent2("setupClone", this);
+    pluginEvent("setupClone", this);
     if (!Sortable.eventCanceled) {
       cloneEl = clone(dragEl);
       cloneEl.removeAttribute("id");
@@ -1295,7 +1295,7 @@ Sortable.prototype = {
       Sortable.clone = cloneEl;
     }
     _this.cloneId = _nextTick(function() {
-      pluginEvent2("clone", _this);
+      pluginEvent("clone", _this);
       if (Sortable.eventCanceled)
         return;
       if (!_this.options.removeCloneOnHide) {
@@ -1336,7 +1336,7 @@ Sortable.prototype = {
     if (_silent)
       return;
     function dragOverEvent(name, extra) {
-      pluginEvent2(name, _this, _objectSpread2({
+      pluginEvent(name, _this, _objectSpread2({
         evt,
         isOwner,
         axis: vertical ? "vertical" : "horizontal",
@@ -1347,8 +1347,8 @@ Sortable.prototype = {
         fromSortable,
         target,
         completed,
-        onMove: function onMove(target2, after2) {
-          return _onMove(rootEl, el, dragEl, dragRect, target2, getRect(target2), evt, after2);
+        onMove: function onMove(target, after) {
+          return _onMove(rootEl, el, dragEl, dragRect, target, getRect(target), evt, after);
         },
         changed
       }, extra));
@@ -1556,7 +1556,7 @@ Sortable.prototype = {
     var el = this.el, options = this.options;
     newIndex = index(dragEl);
     newDraggableIndex = index(dragEl, options.draggable);
-    pluginEvent2("drop", this, {
+    pluginEvent("drop", this, {
       evt
     });
     parentEl = dragEl && dragEl.parentNode;
@@ -1676,7 +1676,7 @@ Sortable.prototype = {
     this._nulling();
   },
   _nulling: function _nulling() {
-    pluginEvent2("nulling", this);
+    pluginEvent("nulling", this);
     rootEl = dragEl = parentEl = ghostEl = nextEl = cloneEl = lastDownEl = cloneHidden = tapEvt = touchEvt = moved = newIndex = newDraggableIndex = oldIndex = oldDraggableIndex = lastTarget = lastDirection = putSortable = activeGroup = Sortable.dragged = Sortable.ghost = Sortable.clone = Sortable.active = null;
     var el = this.el;
     savedInputChecked.forEach(function(checkEl) {
@@ -1715,18 +1715,18 @@ Sortable.prototype = {
     return order;
   },
   sort: function sort(order, useAnimation) {
-    var items = {}, rootEl2 = this.el;
+    var items = {}, rootEl = this.el;
     this.toArray().forEach(function(id, i) {
-      var el = rootEl2.children[i];
-      if (closest(el, this.options.draggable, rootEl2, false)) {
+      var el = rootEl.children[i];
+      if (closest(el, this.options.draggable, rootEl, false)) {
         items[id] = el;
       }
     }, this);
     useAnimation && this.captureAnimationState();
     order.forEach(function(id) {
       if (items[id]) {
-        rootEl2.removeChild(items[id]);
-        rootEl2.appendChild(items[id]);
+        rootEl.removeChild(items[id]);
+        rootEl.appendChild(items[id]);
       }
     });
     useAnimation && this.animateAll();
@@ -1755,7 +1755,7 @@ Sortable.prototype = {
     }
   },
   destroy: function destroy() {
-    pluginEvent2("destroy", this);
+    pluginEvent("destroy", this);
     var el = this.el;
     el[expando] = null;
     off(el, "mousedown", this._onTapStart);
@@ -1765,8 +1765,8 @@ Sortable.prototype = {
       off(el, "dragover", this);
       off(el, "dragenter", this);
     }
-    Array.prototype.forEach.call(el.querySelectorAll("[draggable]"), function(el2) {
-      el2.removeAttribute("draggable");
+    Array.prototype.forEach.call(el.querySelectorAll("[draggable]"), function(el) {
+      el.removeAttribute("draggable");
     });
     this._onDrop();
     this._disableDelayedDragEvents();
@@ -1775,7 +1775,7 @@ Sortable.prototype = {
   },
   _hideClone: function _hideClone() {
     if (!cloneHidden) {
-      pluginEvent2("hideClone", this);
+      pluginEvent("hideClone", this);
       if (Sortable.eventCanceled)
         return;
       css(cloneEl, "display", "none");
@@ -1785,13 +1785,13 @@ Sortable.prototype = {
       cloneHidden = true;
     }
   },
-  _showClone: function _showClone(putSortable2) {
-    if (putSortable2.lastPutMode !== "clone") {
+  _showClone: function _showClone(putSortable) {
+    if (putSortable.lastPutMode !== "clone") {
       this._hideClone();
       return;
     }
     if (cloneHidden) {
-      pluginEvent2("showClone", this);
+      pluginEvent("showClone", this);
       if (Sortable.eventCanceled)
         return;
       if (dragEl.parentNode == rootEl && !this.options.group.revertClone) {
@@ -1815,7 +1815,7 @@ function _globalDragOver(evt) {
   }
   evt.cancelable && evt.preventDefault();
 }
-function _onMove(fromEl, toEl, dragEl2, dragRect, targetEl, targetRect, originalEvent, willInsertAfter) {
+function _onMove(fromEl, toEl, dragEl, dragRect, targetEl, targetRect, originalEvent, willInsertAfter) {
   var evt, sortable = fromEl[expando], onMoveFn = sortable.options.onMove, retVal;
   if (window.CustomEvent && !IE11OrLess && !Edge) {
     evt = new CustomEvent("move", {
@@ -1828,7 +1828,7 @@ function _onMove(fromEl, toEl, dragEl2, dragRect, targetEl, targetRect, original
   }
   evt.to = toEl;
   evt.from = fromEl;
-  evt.dragged = dragEl2;
+  evt.dragged = dragEl;
   evt.draggedRect = dragRect;
   evt.related = targetEl || toEl;
   evt.relatedRect = targetRect || getRect(toEl);
@@ -1946,12 +1946,12 @@ Sortable.get = function(element) {
   return element[expando];
 };
 Sortable.mount = function() {
-  for (var _len = arguments.length, plugins2 = new Array(_len), _key = 0;_key < _len; _key++) {
-    plugins2[_key] = arguments[_key];
+  for (var _len = arguments.length, plugins = new Array(_len), _key = 0;_key < _len; _key++) {
+    plugins[_key] = arguments[_key];
   }
-  if (plugins2[0].constructor === Array)
-    plugins2 = plugins2[0];
-  plugins2.forEach(function(plugin) {
+  if (plugins[0].constructor === Array)
+    plugins = plugins[0];
+  plugins.forEach(function(plugin) {
     if (!plugin.prototype || !plugin.prototype.constructor) {
       throw "Sortable: Mounted plugin must be a constructor function, not ".concat({}.toString.call(plugin));
     }
@@ -2070,24 +2070,24 @@ function clearAutoScrolls() {
 function clearPointerElemChangedInterval() {
   clearInterval(pointerElemChangedInterval);
 }
-var autoScroll = throttle(function(evt, options, rootEl2, isFallback) {
+var autoScroll = throttle(function(evt, options, rootEl, isFallback) {
   if (!options.scroll)
     return;
-  var x = (evt.touches ? evt.touches[0] : evt).clientX, y = (evt.touches ? evt.touches[0] : evt).clientY, sens = options.scrollSensitivity, speed = options.scrollSpeed, winScroller = getWindowScrollingElement();
+  var x = (evt.touches ? evt.touches[0] : evt).clientX, y = (evt.touches ? evt.touches[0] : evt).clientY, { scrollSensitivity: sens, scrollSpeed: speed } = options, winScroller = getWindowScrollingElement();
   var scrollThisInstance = false, scrollCustomFn;
-  if (scrollRootEl !== rootEl2) {
-    scrollRootEl = rootEl2;
+  if (scrollRootEl !== rootEl) {
+    scrollRootEl = rootEl;
     clearAutoScrolls();
     scrollEl = options.scroll;
     scrollCustomFn = options.scrollFn;
     if (scrollEl === true) {
-      scrollEl = getParentAutoScrollElement(rootEl2, true);
+      scrollEl = getParentAutoScrollElement(rootEl, true);
     }
   }
   var layersOut = 0;
   var currentParent = scrollEl;
   do {
-    var el = currentParent, rect = getRect(el), top = rect.top, bottom = rect.bottom, left = rect.left, right = rect.right, width = rect.width, height = rect.height, canScrollX = undefined, canScrollY = undefined, scrollWidth = el.scrollWidth, scrollHeight = el.scrollHeight, elCSS = css(el), scrollPosX = el.scrollLeft, scrollPosY = el.scrollTop;
+    var el = currentParent, rect = getRect(el), { top, bottom, left, right, width, height } = rect, canScrollX = undefined, canScrollY = undefined, { scrollWidth, scrollHeight } = el, elCSS = css(el), { scrollLeft: scrollPosX, scrollTop: scrollPosY } = el;
     if (el === winScroller) {
       canScrollX = width < scrollWidth && (elCSS.overflowX === "auto" || elCSS.overflowX === "scroll" || elCSS.overflowX === "visible");
       canScrollY = height < scrollHeight && (elCSS.overflowY === "auto" || elCSS.overflowY === "scroll" || elCSS.overflowY === "visible");
@@ -2132,11 +2132,11 @@ var autoScroll = throttle(function(evt, options, rootEl2, isFallback) {
   } while (options.bubbleScroll && currentParent !== winScroller && (currentParent = getParentAutoScrollElement(currentParent, false)));
   scrolling = scrollThisInstance;
 }, 30);
-var drop = function drop2(_ref) {
-  var { originalEvent, putSortable: putSortable2, dragEl: dragEl2, activeSortable, dispatchSortableEvent, hideGhostForTarget, unhideGhostForTarget } = _ref;
+var drop = function drop(_ref) {
+  var { originalEvent, putSortable, dragEl, activeSortable, dispatchSortableEvent, hideGhostForTarget, unhideGhostForTarget } = _ref;
   if (!originalEvent)
     return;
-  var toSortable = putSortable2 || activeSortable;
+  var toSortable = putSortable || activeSortable;
   hideGhostForTarget();
   var touch = originalEvent.changedTouches && originalEvent.changedTouches.length ? originalEvent.changedTouches[0] : originalEvent;
   var target = document.elementFromPoint(touch.clientX, touch.clientY);
@@ -2144,8 +2144,8 @@ var drop = function drop2(_ref) {
   if (toSortable && !toSortable.el.contains(target)) {
     dispatchSortableEvent("spill");
     this.onSpill({
-      dragEl: dragEl2,
-      putSortable: putSortable2
+      dragEl,
+      putSortable
     });
   }
 };
@@ -2153,24 +2153,24 @@ function Revert() {}
 Revert.prototype = {
   startIndex: null,
   dragStart: function dragStart(_ref2) {
-    var oldDraggableIndex2 = _ref2.oldDraggableIndex;
-    this.startIndex = oldDraggableIndex2;
+    var oldDraggableIndex = _ref2.oldDraggableIndex;
+    this.startIndex = oldDraggableIndex;
   },
   onSpill: function onSpill(_ref3) {
-    var { dragEl: dragEl2, putSortable: putSortable2 } = _ref3;
+    var { dragEl, putSortable } = _ref3;
     this.sortable.captureAnimationState();
-    if (putSortable2) {
-      putSortable2.captureAnimationState();
+    if (putSortable) {
+      putSortable.captureAnimationState();
     }
     var nextSibling = getChild(this.sortable.el, this.startIndex, this.options);
     if (nextSibling) {
-      this.sortable.el.insertBefore(dragEl2, nextSibling);
+      this.sortable.el.insertBefore(dragEl, nextSibling);
     } else {
-      this.sortable.el.appendChild(dragEl2);
+      this.sortable.el.appendChild(dragEl);
     }
     this.sortable.animateAll();
-    if (putSortable2) {
-      putSortable2.animateAll();
+    if (putSortable) {
+      putSortable.animateAll();
     }
   },
   drop
@@ -2180,11 +2180,11 @@ _extends(Revert, {
 });
 function Remove() {}
 Remove.prototype = {
-  onSpill: function onSpill2(_ref4) {
-    var { dragEl: dragEl2, putSortable: putSortable2 } = _ref4;
-    var parentSortable = putSortable2 || this.sortable;
+  onSpill: function onSpill(_ref4) {
+    var { dragEl, putSortable } = _ref4;
+    var parentSortable = putSortable || this.sortable;
     parentSortable.captureAnimationState();
-    dragEl2.parentNode && dragEl2.parentNode.removeChild(dragEl2);
+    dragEl.parentNode && dragEl.parentNode.removeChild(dragEl);
     parentSortable.animateAll();
   },
   drop
@@ -2198,11 +2198,11 @@ var sortable_esm_default = Sortable;
 
 // src/prompt-templates.ts
 var SCENEMAP_PROMPT_MACROS = [
-  { token: "{{scenemap_context}}", description: "Character, persona, scenario and active World Info, with separators." },
+  { token: "{{scenemap_context}}", description: "Character, persona, scenario and activated entries from this chat's selected lorebooks, with separators." },
   { token: "{{scenemap_character}}", description: "Character description and personality." },
   { token: "{{scenemap_persona}}", description: "Active persona description." },
   { token: "{{scenemap_scenario}}", description: "Character scenario." },
-  { token: "{{scenemap_world_info}}", description: "Active World Book entries." },
+  { token: "{{scenemap_world_info}}", description: "Activated entries from the lorebooks selected for SceneMap in this chat." },
   { token: "{{scenemap_chat_history::N}}", description: "Last N messages in chronological order, separated by a blank line. Omit ::N for all." },
   { token: "{{scenemap_schema}}", description: "Configured tracker schema." },
   { token: "{{scenemap_response_schema}}", description: "Schema expected for this operation, including partial regeneration." },
@@ -2469,7 +2469,7 @@ function jsonValuesEqual(left, right) {
   if (Object.is(left, right))
     return true;
   if (Array.isArray(left) || Array.isArray(right)) {
-    return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((value, index2) => jsonValuesEqual(value, right[index2]));
+    return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((value, index) => jsonValuesEqual(value, right[index]));
   }
   if (!left || !right || typeof left !== "object" || typeof right !== "object")
     return false;
@@ -2482,8 +2482,8 @@ function jsonValuesEqual(left, right) {
 function schemaFingerprint(schema) {
   const text = stableJsonStringify(schema);
   let hash = 2166136261;
-  for (let index2 = 0;index2 < text.length; index2 += 1) {
-    hash ^= text.charCodeAt(index2);
+  for (let index = 0;index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
     hash = Math.imul(hash, 16777619);
   }
   return `fnv1a-${(hash >>> 0).toString(16).padStart(8, "0")}`;
@@ -2838,22 +2838,22 @@ function isLeapYear(year) {
   return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
 }
 function date(str) {
-  const matches2 = str.match(DATE);
-  if (!matches2)
+  const matches = str.match(DATE);
+  if (!matches)
     return false;
-  const year = +matches2[1];
-  const month = +matches2[2];
-  const day = +matches2[3];
+  const year = +matches[1];
+  const month = +matches[2];
+  const day = +matches[3];
   return month >= 1 && month <= 12 && day >= 1 && day <= (month == 2 && isLeapYear(year) ? 29 : DAYS[month]);
 }
 function time(full, str) {
-  const matches2 = str.match(TIME);
-  if (!matches2)
+  const matches = str.match(TIME);
+  if (!matches)
     return false;
-  const hour = +matches2[1];
-  const minute = +matches2[2];
-  const second = +matches2[3];
-  const timeZone = !!matches2[5];
+  const hour = +matches[1];
+  const minute = +matches[2];
+  const second = +matches[3];
+  const timeZone = !!matches[5];
   return (hour <= 23 && minute <= 59 && second <= 59 || hour == 23 && minute == 59 && second == 60) && (!full || timeZone);
 }
 var DATE_TIME_SEPARATOR = /t|\s/i;
@@ -2882,15 +2882,15 @@ function regex(str) {
 function ucs2length(s) {
   let result = 0;
   let length = s.length;
-  let index2 = 0;
+  let index = 0;
   let charCode;
-  while (index2 < length) {
+  while (index < length) {
     result++;
-    charCode = s.charCodeAt(index2++);
-    if (charCode >= 55296 && charCode <= 56319 && index2 < length) {
-      charCode = s.charCodeAt(index2);
+    charCode = s.charCodeAt(index++);
+    if (charCode >= 55296 && charCode <= 56319 && index < length) {
+      charCode = s.charCodeAt(index);
       if ((charCode & 64512) == 56320) {
-        index2++;
+        index++;
       }
     }
   }
@@ -2954,8 +2954,8 @@ function validate(instance, schema, draft = "2019-09", lookup = dereference(sche
     }
   }
   if ($ref !== undefined) {
-    const uri2 = __absolute_ref__ || $ref;
-    const refSchema = lookup[uri2];
+    const uri = __absolute_ref__ || $ref;
+    const refSchema = lookup[uri];
     if (refSchema === undefined) {
       let message = `Unresolved $ref "${$ref}".`;
       if (__absolute_ref__ && __absolute_ref__ !== $ref) {
@@ -3119,7 +3119,7 @@ Known schemas:
   if ($oneOf !== undefined) {
     const keywordLocation = `${schemaLocation}/oneOf`;
     const errorsLength = errors.length;
-    const matches2 = $oneOf.filter((subSchema, i) => {
+    const matches = $oneOf.filter((subSchema, i) => {
       const subEvaluated = Object.create(evaluated);
       const result = validate(instance, subSchema, draft, lookup, shortCircuit, $recursiveAnchor === true ? recursiveAnchor : null, instanceLocation, `${keywordLocation}/${i}`, subEvaluated);
       errors.push(...result.errors);
@@ -3128,14 +3128,14 @@ Known schemas:
       }
       return result.valid;
     }).length;
-    if (matches2 === 1) {
+    if (matches === 1) {
       errors.length = errorsLength;
     } else {
       errors.splice(errorsLength, 0, {
         instanceLocation,
         keyword: "oneOf",
         keywordLocation,
-        error: `Instance does not match exactly one subschema (${matches2} matches).`
+        error: `Instance does not match exactly one subschema (${matches} matches).`
       });
     }
   }
@@ -3306,10 +3306,10 @@ Known schemas:
     if (!stop && $patternProperties !== undefined) {
       const keywordLocation = `${schemaLocation}/patternProperties`;
       for (const pattern in $patternProperties) {
-        const regex2 = new RegExp(pattern, "u");
+        const regex = new RegExp(pattern, "u");
         const subSchema = $patternProperties[pattern];
         for (const key in instance) {
-          if (!regex2.test(key)) {
+          if (!regex.test(key)) {
             continue;
           }
           const subInstancePointer = `${instanceLocation}/${encodePointer(key)}`;
@@ -3443,16 +3443,16 @@ Known schemas:
         }
       }
       if (!stop && $additionalItems !== undefined) {
-        const keywordLocation2 = `${schemaLocation}/additionalItems`;
+        const keywordLocation = `${schemaLocation}/additionalItems`;
         for (;i < length; i++) {
-          const result = validate(instance[i], $additionalItems, draft, lookup, shortCircuit, recursiveAnchor, `${instanceLocation}/${i}`, keywordLocation2);
+          const result = validate(instance[i], $additionalItems, draft, lookup, shortCircuit, recursiveAnchor, `${instanceLocation}/${i}`, keywordLocation);
           evaluated[i] = true;
           if (!result.valid) {
             stop = shortCircuit;
             errors.push({
               instanceLocation,
               keyword: "additionalItems",
-              keywordLocation: keywordLocation2,
+              keywordLocation,
               error: `Items did not match additional items schema.`
             }, ...result.errors);
           }
@@ -3759,14 +3759,14 @@ function assertSchemaWellFormed(schema, path = "#", seen = new WeakSet) {
       continue;
     if (!Array.isArray(children) || children.length === 0)
       throw new Error(`${path}/${keyword} must be a non-empty array.`);
-    children.forEach((child, index2) => assertSchemaWellFormed(child, `${path}/${keyword}/${index2}`, seen));
+    children.forEach((child, index) => assertSchemaWellFormed(child, `${path}/${keyword}/${index}`, seen));
   }
   for (const keyword of ["items", "additionalItems", "contains", "additionalProperties", "propertyNames", "not", "if", "then", "else"]) {
     const child = record[keyword];
     if (child === undefined)
       continue;
     if (keyword === "items" && Array.isArray(child)) {
-      child.forEach((item, index2) => assertSchemaWellFormed(item, `${path}/items/${index2}`, seen));
+      child.forEach((item, index) => assertSchemaWellFormed(item, `${path}/items/${index}`, seen));
     } else {
       assertSchemaWellFormed(child, `${path}/${keyword}`, seen);
     }
@@ -3826,9 +3826,9 @@ function collectFields(value, path, groups, label, fields) {
   }
   if (Array.isArray(value) && value.length > 0 && value.every((item) => getRecord(item) !== null)) {
     const nextGroups = label ? [...groups, label] : groups;
-    value.forEach((item, index2) => {
-      const name = compactLabel(getRecord(item)?.name) || `Item ${index2 + 1}`;
-      collectFields(item, [...path, index2], [...nextGroups, name], "", fields);
+    value.forEach((item, index) => {
+      const name = compactLabel(getRecord(item)?.name) || `Item ${index + 1}`;
+      collectFields(item, [...path, index], [...nextGroups, name], "", fields);
     });
     return;
   }
@@ -4023,8 +4023,8 @@ function parseNumericValue(raw, integer) {
 }
 function parseTrackerEditValue(kind, raw, schema) {
   if (kind === "enum") {
-    const index2 = Number(raw);
-    return Number.isSafeInteger(index2) && Array.isArray(schema.enum) && index2 >= 0 && index2 < schema.enum.length ? structuredClone(schema.enum[index2]) : raw;
+    const index = Number(raw);
+    return Number.isSafeInteger(index) && Array.isArray(schema.enum) && index >= 0 && index < schema.enum.length ? structuredClone(schema.enum[index]) : raw;
   }
   if (kind === "boolean")
     return raw === "true";
@@ -4046,11 +4046,11 @@ function setTrackerValueAtPath(root, path, value) {
   if (!root || typeof root !== "object" || path.length === 0)
     return false;
   let current = root;
-  for (let index2 = 0;index2 < path.length - 1; index2 += 1) {
-    const segment = path[index2];
+  for (let index = 0;index < path.length - 1; index += 1) {
+    const segment = path[index];
     if (typeof segment === "string" && blockedPathKeys.has(segment))
       return false;
-    const nextSegment = path[index2 + 1];
+    const nextSegment = path[index + 1];
     let next = current[segment];
     if (!next || typeof next !== "object") {
       next = typeof nextSegment === "number" ? [] : {};
@@ -4064,11 +4064,11 @@ function setTrackerValueAtPath(root, path, value) {
   current[finalSegment] = value;
   return true;
 }
-function removeTrackerArrayItem(root, path, index2) {
+function removeTrackerArrayItem(root, path, index) {
   const value = getTrackerValueAtPath(root, path);
-  if (!Array.isArray(value) || index2 < 0 || index2 >= value.length)
+  if (!Array.isArray(value) || index < 0 || index >= value.length)
     return false;
-  value.splice(index2, 1);
+  value.splice(index, 1);
   return true;
 }
 function appendTrackerArrayItem(root, path, value) {
@@ -4118,6 +4118,87 @@ function createTrackerEditDefaultValue(schema, depth = 0) {
   return "";
 }
 
+// src/lorebook-selection.ts
+var LOREBOOK_SOURCES = ["character", "persona", "chat", "global"];
+function normalizeLorebookIds(value) {
+  if (!Array.isArray(value))
+    return [];
+  return [...new Set(value.flatMap((id) => typeof id === "string" && id.trim() ? [id.trim()] : []))];
+}
+function toggleLorebookSelection(ids, bookId, enabled) {
+  return enabled ? normalizeLorebookIds([...ids, bookId]) : ids.filter((id) => id !== bookId);
+}
+class LorebookSelectionDraft {
+  pending = new Map;
+  begin(requestId, chatId, bookId, enabled) {
+    this.pending.set(requestId, { chatId, bookId, enabled });
+  }
+  settle(requestId) {
+    return this.pending.delete(requestId);
+  }
+  overlay(chatId, ids) {
+    let selected = [...ids];
+    for (const pending of this.pending.values()) {
+      if (pending.chatId === chatId)
+        selected = toggleLorebookSelection(selected, pending.bookId, pending.enabled);
+    }
+    return selected;
+  }
+  reset() {
+    this.pending.clear();
+  }
+}
+
+// src/lorebook-panel.ts
+var titles = {
+  character: "Character",
+  persona: "Persona",
+  chat: "Chat",
+  global: "Global"
+};
+var icons = {
+  character: '<circle cx="12" cy="8" r="4"/><path d="M5 21v-2a7 7 0 0 1 14 0v2"/>',
+  persona: '<rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="9" cy="10" r="2"/><path d="M6 16a3 3 0 0 1 6 0m3-6h3m-3 4h3"/>',
+  chat: '<path d="M21 11.5a8.4 8.4 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.4 8.4 0 0 1-3.8-.9L3 21l1.9-5.7a8.4 8.4 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.4 8.4 0 0 1 3.8-.9h.5a8.5 8.5 0 0 1 8 8v.5Z"/>',
+  global: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18m-9-9a16 16 0 0 1 0 18 16 16 0 0 1 0-18Z"/>'
+};
+function escape(value) {
+  return value.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
+}
+function countSelectedLorebooks(groups, selectedIds) {
+  const available = new Set(groups.flatMap((group) => group.books.map((book) => book.id)));
+  return new Set(selectedIds.filter((id) => available.has(id))).size;
+}
+function renderLorebookPanel(options) {
+  const { chatId, groups, selectedIds, error, loading } = options;
+  const selected = new Set(selectedIds);
+  let content;
+  if (loading)
+    content = '<p class="scenemap-lorebook-empty" role="status">Loading chat lorebooks...</p>';
+  else if (!chatId)
+    content = '<p class="scenemap-lorebook-empty">Open a chat to choose its lorebooks.</p>';
+  else if (error)
+    content = `<p class="scenemap-runtime-error" role="alert">${escape(error)}</p>`;
+  else
+    content = LOREBOOK_SOURCES.map((source) => {
+      const books = groups.find((group) => group.source === source)?.books ?? [];
+      const rows = books.map((book) => `
+      <label class="scenemap-lorebook-row">
+        <input type="checkbox" data-lorebook-id="${escape(book.id)}" ${selected.has(book.id) ? "checked" : ""}>
+        <span>${escape(book.name)}</span>
+      </label>`).join("");
+      return `<fieldset class="scenemap-lorebook-group">
+      <legend><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[source]}</svg><span>${titles[source]}:</span><span class="scenemap-lorebook-source-count">${books.length}</span></legend>
+      ${rows || '<p class="scenemap-lorebook-empty">No attached lorebooks.</p>'}
+    </fieldset>`;
+    }).join("");
+  return `<section class="scenemap-settings-group scenemap-lorebooks" data-lorebook-panel>
+    <div class="scenemap-settings-group-heading"><h3>Lorebooks</h3><span class="scenemap-lorebook-count" data-lorebook-count aria-live="polite">${countSelectedLorebooks(groups, selectedIds)} selected</span></div>
+    <p class="scenemap-lorebook-hint">Choose which lorebooks SceneMap can use in this chat. Only their activated entries are included. Saved automatically.</p>
+    <div class="scenemap-lorebook-groups">${content}</div>
+  </section>`;
+}
+
 // src/frontend.ts
 var state = {
   settings: defaultSettings,
@@ -4130,7 +4211,10 @@ var state = {
   activeSwipeId: null,
   generationActive: false,
   generatingMessageId: null,
-  connections: []
+  connections: [],
+  lorebookGroups: [],
+  selectedLorebookIds: [],
+  lorebookError: null
 };
 var ctxRef = null;
 var rootRef = null;
@@ -4153,6 +4237,8 @@ var trackerEditRequestSeq = 0;
 var settingsSaveRequestSeq = 0;
 var automaticSaveRequestSeq = 0;
 var stateRequestSeq = 0;
+var lorebookSelectionRequestSeq = 0;
+var confirmedLorebookSelection = { chatId: null, ids: [] };
 var drawerSelectHandles = [];
 var automaticSaveTimer = null;
 var drawerScrollRestoreFrame = null;
@@ -4167,6 +4253,7 @@ var pendingTextEditors = new Map;
 var settingsDraft = new SettingsDraftTracker;
 var automaticSettingsDraft = new AutomaticSettingsDraftTracker;
 var stateRefreshGate = new StateRefreshGate;
+var lorebookSelectionDraft = new LorebookSelectionDraft;
 var GENERATION_REQUEST_TIMEOUT_MS = 1e4;
 var STATE_LOAD_ERROR = "SceneMap could not load its state. It will retry after the next chat update.";
 var TOP_TOOLBAR_DOUBLE_CLICK_MS = 280;
@@ -4180,6 +4267,7 @@ function setup(ctx) {
   trackerEditSession = null;
   settingsDraft.reset();
   automaticSettingsDraft.reset();
+  lorebookSelectionDraft.reset();
   presetEditorDrafts.clear();
   pendingTextEditors.clear();
   settingsDraft.initialize(presetSettingsFingerprint(state.settings));
@@ -4232,6 +4320,10 @@ function setup(ctx) {
       const preserveActiveSettings = settingsSurfaceHasActiveInteraction();
       const previousState = state;
       const incomingState = payload.state;
+      confirmedLorebookSelection = { chatId: incomingState.chatId, ids: incomingState.selectedLorebookIds };
+      if (typeof payload.lorebookSelectionRequestId === "string") {
+        lorebookSelectionDraft.settle(payload.lorebookSelectionRequestId);
+      }
       hasReceivedInitialState = true;
       if (trackerRuntimeError === STATE_LOAD_ERROR)
         trackerRuntimeError = null;
@@ -4251,7 +4343,8 @@ function setup(ctx) {
       const baseSettings = settingsDraft.dirty ? state.settings : incomingState.settings;
       const nextState = {
         ...incomingState,
-        settings: automaticSettingsDraft.overlay(baseSettings)
+        settings: automaticSettingsDraft.overlay(baseSettings),
+        selectedLorebookIds: lorebookSelectionDraft.overlay(incomingState.chatId, incomingState.selectedLorebookIds)
       };
       state = nextState;
       if (!settingsDraft.dirty && !settingsDraft.saving) {
@@ -4303,16 +4396,25 @@ function setup(ctx) {
     if (payload?.type === "error") {
       const saveFailed = typeof payload.requestId === "string" && settingsDraft.fail(payload.requestId);
       const automaticSaveFailed = typeof payload.requestId === "string" && automaticSettingsDraft.fail(payload.requestId);
+      const lorebookSaveFailed = typeof payload.requestId === "string" && lorebookSelectionDraft.settle(payload.requestId);
+      if (lorebookSaveFailed) {
+        state = {
+          ...state,
+          selectedLorebookIds: lorebookSelectionDraft.overlay(state.chatId, confirmedLorebookSelection.chatId === state.chatId ? confirmedLorebookSelection.ids : [])
+        };
+        syncLorebookSelectionUi();
+        requestState();
+      }
       const pendingEditor = typeof payload.requestId === "string" ? takePendingTextEditor(payload.requestId) : null;
       const trackerEditFailed = typeof payload.requestId === "string" && trackerEditSession?.requestId === payload.requestId;
       if (trackerEditFailed && trackerEditSession)
         trackerEditSession.requestId = null;
-      if (!saveFailed && !automaticSaveFailed && !pendingEditor && !trackerEditFailed)
+      if (!saveFailed && !automaticSaveFailed && !lorebookSaveFailed && !pendingEditor && !trackerEditFailed)
         clearGenerationRequestPending();
       syncSettingsDraftUi();
       renderChatToolbar();
       renderTopToolbarButton();
-      if (saveFailed || automaticSaveFailed) {
+      if (saveFailed || automaticSaveFailed || lorebookSaveFailed) {
         tabHandle?.activate();
         showSettingsError(payload.message);
       } else if (pendingEditor?.surface === "settings") {
@@ -4327,6 +4429,13 @@ function setup(ctx) {
   });
   const offEvents = [
     ctx.events.on("CHAT_SWITCHED", () => requestState()),
+    ctx.events.on("CHAT_CHANGED", () => requestState()),
+    ctx.events.on("CHARACTER_EDITED", () => requestState()),
+    ctx.events.on("PERSONA_CHANGED", () => requestState()),
+    ctx.events.on("SETTINGS_UPDATED", () => requestState()),
+    ctx.events.on("WORLD_BOOK_CHANGED", () => requestState()),
+    ctx.events.on("WORLD_BOOK_LIBRARY_CHANGED", () => requestState()),
+    ctx.events.on("WORLD_BOOK_DELETED", () => requestState()),
     ctx.events.on("MESSAGE_EDITED", () => requestState()),
     ctx.events.on("MESSAGE_DELETED", handleMessageDeleted),
     ctx.events.on("MESSAGE_SWIPED", () => requestState()),
@@ -4356,8 +4465,8 @@ function setup(ctx) {
     topToolbarRoot.removeEventListener("pointercancel", handleTopToolbarPointerCancel);
     topToolbarRoot.removeEventListener("keydown", handleTopToolbarKeydown);
     offBackend();
-    for (const off2 of offEvents)
-      off2();
+    for (const off of offEvents)
+      off();
     offTabActivate();
     destroySelectHandles(drawerSelectHandles);
     drawerSelectHandles = [];
@@ -4385,6 +4494,7 @@ function setup(ctx) {
     settingsDraft.reset();
     presetEditorDrafts.clear();
     automaticSettingsDraft.reset();
+    lorebookSelectionDraft.reset();
     pendingTextEditors.clear();
   };
 }
@@ -4515,7 +4625,7 @@ function settingsSurfaceHasActiveInteraction() {
   return activeElement instanceof Element && rootRef.contains(activeElement) || rootRef.querySelector('[aria-expanded="true"]') !== null;
 }
 function settingsSurfaceStructureMatches(previous, next) {
-  return jsonValuesEqual(previous.settings, next.settings) && jsonValuesEqual(previous.connections, next.connections);
+  return jsonValuesEqual(previous.settings, next.settings) && jsonValuesEqual(previous.connections, next.connections) && previous.chatId === next.chatId && jsonValuesEqual(previous.lorebookGroups, next.lorebookGroups) && jsonValuesEqual(previous.selectedLorebookIds, next.selectedLorebookIds) && previous.lorebookError === next.lorebookError;
 }
 function render(options = {}) {
   syncTrackerPlacement();
@@ -4771,6 +4881,7 @@ function renderDrawerSettings() {
         </label>
       </div>
         </div>
+        ${renderLorebookPanel({ chatId: state.chatId, groups: state.lorebookGroups, selectedIds: state.selectedLorebookIds, error: state.lorebookError, loading: !hasReceivedInitialState })}
         <div class="scenemap-settings-group">
           <h3>Interface</h3>
           <label>
@@ -4851,7 +4962,7 @@ function renderDrawerSettings() {
 function mountSettingsSelects(settings) {
   if (!ctxRef || !rootRef)
     return;
-  const mount2 = (key, options, value, extra = {}) => {
+  const mount = (key, options, value, extra = {}) => {
     const target = rootRef?.querySelector(`[data-native-setting="${key}"]`);
     if (!target || !ctxRef)
       return;
@@ -4865,7 +4976,7 @@ function mountSettingsSelects(settings) {
       ...extra
     }));
   };
-  mount2("connectionId", state.connections.map((connection) => ({
+  mount("connectionId", state.connections.map((connection) => ({
     value: connection.id,
     label: connection.name,
     sublabel: `${connection.model || connection.provider}${connection.is_default ? " · default" : ""}`
@@ -4875,11 +4986,11 @@ function mountSettingsSelects(settings) {
     clearLabel: "Default active connection",
     searchPlaceholder: "Search connections..."
   });
-  mount2("trackerPlacement", [
+  mount("trackerPlacement", [
     { value: "dock", label: "Dock panel" },
     { value: "drawer", label: "Drawer" }
   ], settings.trackerPlacement, { searchThreshold: Number.MAX_SAFE_INTEGER });
-  mount2("schemaPreset", presetSelectOptions(settings), settings.schemaPreset, { searchPlaceholder: "Search presets..." });
+  mount("schemaPreset", presetSelectOptions(settings), settings.schemaPreset, { searchPlaceholder: "Search presets..." });
 }
 function presetSelectOptions(settings) {
   const nameCounts = new Map;
@@ -5137,8 +5248,8 @@ function removeTrackerEditCard(button) {
   if (!session || session.requestId)
     return;
   const path = readTrackerEditPath(button.dataset.editPath);
-  const index2 = Number(button.dataset.editIndex);
-  if (!path || !Number.isSafeInteger(index2) || !removeTrackerArrayItem(session.draft, path, index2))
+  const index = Number(button.dataset.editIndex);
+  if (!path || !Number.isSafeInteger(index) || !removeTrackerArrayItem(session.draft, path, index))
     return;
   renderTrackerEditSurface();
 }
@@ -5157,8 +5268,8 @@ function removeTrackerEditChip(button) {
   if (!session || session.requestId)
     return;
   const path = readTrackerEditPath(button.dataset.editPath);
-  const index2 = Number(button.dataset.editIndex);
-  if (!path || !Number.isSafeInteger(index2) || !removeTrackerArrayItem(session.draft, path, index2))
+  const index = Number(button.dataset.editIndex);
+  if (!path || !Number.isSafeInteger(index) || !removeTrackerArrayItem(session.draft, path, index))
     return;
   renderTrackerEditSurface();
 }
@@ -5321,7 +5432,7 @@ function openRegenerationModal() {
       dispatchGeneration({ type: "generate_tracker" });
       return;
     }
-    const paths = Array.from(root.querySelectorAll("[data-regeneration-field]:checked")).map((input) => Number(input.dataset.regenerationField)).filter((index2) => Number.isSafeInteger(index2) && fields[index2]).map((index2) => fields[index2].path);
+    const paths = Array.from(root.querySelectorAll("[data-regeneration-field]:checked")).map((input) => Number(input.dataset.regenerationField)).filter((index) => Number.isSafeInteger(index) && fields[index]).map((index) => fields[index].path);
     const feedback = root.querySelector("[data-regeneration-feedback]")?.value ?? "";
     if (paths.length === 0) {
       syncControls();
@@ -5348,19 +5459,19 @@ function openRegenerationModal() {
 }
 function renderRegenerationFieldChoices(fields) {
   const groups = new Map;
-  fields.forEach((field, index2) => {
+  fields.forEach((field, index) => {
     const labels = field.groups.length > 0 ? field.groups : ["Tracker"];
     const key = JSON.stringify(labels);
     const group = groups.get(key) ?? { labels, fields: [] };
-    group.fields.push({ field, index: index2 });
+    group.fields.push({ field, index });
     groups.set(key, group);
   });
   return Array.from(groups.values()).map((group) => `
     <section class="scenemap-regeneration-group">
       <h3>${escapeHtml(group.labels.join(" › "))}</h3>
-      ${group.fields.map(({ field, index: index2 }) => `
+      ${group.fields.map(({ field, index }) => `
         <label class="scenemap-regeneration-field">
-          <input type="checkbox" data-regeneration-field="${index2}">
+          <input type="checkbox" data-regeneration-field="${index}">
           <span>
             <strong>${escapeHtml(field.label)}</strong>
             <small>${escapeHtml(regenerationValuePreview(field.currentValue))}</small>
@@ -5682,6 +5793,10 @@ function ensureCurrentPresetLayoutValid() {
 }
 function handleChange(event) {
   const target = event.target;
+  if (target instanceof HTMLInputElement && target.dataset.lorebookId) {
+    updateLorebookSelection(target.dataset.lorebookId, target.checked);
+    return;
+  }
   if (target.dataset.trackerEditControl) {
     updateTrackerEditControl(target);
     return;
@@ -5690,6 +5805,25 @@ function handleChange(event) {
   if (!isAutomaticallySavedSetting(key))
     return;
   updateSettingFromControl(target, key, true);
+}
+function updateLorebookSelection(bookId, enabled) {
+  if (!ctxRef || !state.chatId || !state.lorebookGroups.some((group) => group.books.some((book) => book.id === bookId)))
+    return;
+  clearSettingsRuntimeError();
+  const requestId = `lorebook-selection-${++lorebookSelectionRequestSeq}`;
+  lorebookSelectionDraft.begin(requestId, state.chatId, bookId, enabled);
+  state = { ...state, selectedLorebookIds: lorebookSelectionDraft.overlay(state.chatId, state.selectedLorebookIds) };
+  syncLorebookSelectionUi();
+  ctxRef.sendToBackend({ type: "set_chat_lorebook", requestId, chatId: state.chatId, bookId, enabled });
+}
+function syncLorebookSelectionUi() {
+  const selected = new Set(state.selectedLorebookIds);
+  rootRef?.querySelectorAll("[data-lorebook-id]").forEach((input) => {
+    input.checked = selected.has(input.dataset.lorebookId ?? "");
+  });
+  const count = rootRef?.querySelector("[data-lorebook-count]");
+  if (count)
+    count.textContent = `${countSelectedLorebooks(state.lorebookGroups, state.selectedLorebookIds)} selected`;
 }
 function handleInput(event) {
   const target = event.target;
@@ -5969,7 +6103,7 @@ function openNameEditor(title, initialValue, submitLabel, onSave) {
   const error = modal.root.querySelector(".scenemap-inline-error");
   input.focus();
   input.select();
-  const save2 = () => {
+  const save = () => {
     const name = input.value.trim();
     if (!name)
       throw new Error("Preset name is required.");
@@ -5984,7 +6118,7 @@ function openNameEditor(title, initialValue, submitLabel, onSave) {
       return;
     event.preventDefault();
     try {
-      save2();
+      save();
     } catch (err) {
       error.hidden = false;
       error.textContent = err.message;
@@ -5999,7 +6133,7 @@ function openNameEditor(title, initialValue, submitLabel, onSave) {
       return;
     }
     try {
-      save2();
+      save();
     } catch (err) {
       error.hidden = false;
       error.textContent = err.message;
@@ -6012,10 +6146,10 @@ function slugifyPresetName(name) {
 }
 function uniquePresetKey(base, presets) {
   let key = base;
-  let index2 = 2;
+  let index = 2;
   while (Object.prototype.hasOwnProperty.call(presets, key)) {
-    key = `${base}_${index2}`;
-    index2 += 1;
+    key = `${base}_${index}`;
+    index += 1;
   }
   return key;
 }
@@ -6225,15 +6359,15 @@ function renderLayoutSection(section, sectionIndex, layout, options) {
   `;
 }
 function renderLayoutField(field, sectionIndex, fieldIndex, options) {
-  const option2 = findFieldOption(options, field.path);
-  const missingFromSchema = !option2;
-  const childEditor = field.display === "character_cards" ? renderChildFieldEditor(field, option2?.children ?? [], sectionIndex, fieldIndex) : "";
+  const option = findFieldOption(options, field.path);
+  const missingFromSchema = !option;
+  const childEditor = field.display === "character_cards" ? renderChildFieldEditor(field, option?.children ?? [], sectionIndex, fieldIndex) : "";
   return `
     <article class="scenemap-layout-field ${missingFromSchema ? "is-missing-schema-field" : ""}" data-layout-field-item>
       <div class="scenemap-layout-field-row ${field.display === "chips" ? "has-chip-center" : ""}">
         ${layoutDragHandle("field", "Drag to reorder field", { section: sectionIndex, field: fieldIndex })}
         <div class="scenemap-native-select" data-layout-select="field-path" data-section="${sectionIndex}" data-field="${fieldIndex}"></div>
-        <input aria-label="Label" data-layout-input="field-label" data-section="${sectionIndex}" data-field="${fieldIndex}" value="${escapeAttr(field.label ?? option2?.label ?? "")}" placeholder="Label">
+        <input aria-label="Label" data-layout-input="field-label" data-section="${sectionIndex}" data-field="${fieldIndex}" value="${escapeAttr(field.label ?? option?.label ?? "")}" placeholder="Label">
         <div class="scenemap-layout-display-controls ${field.display === "chips" ? "has-center-select" : ""}">
           <div class="scenemap-native-select" data-layout-select="field-display" data-section="${sectionIndex}" data-field="${fieldIndex}"></div>
           ${field.display === "chips" ? `<div class="scenemap-native-select" data-layout-select="field-center" data-section="${sectionIndex}" data-field="${fieldIndex}"></div>` : ""}
@@ -6498,16 +6632,16 @@ function mountLayoutSelects(root, layout, options, redraw) {
       value = field.path;
       ariaLabel = "Field";
       searchable = true;
-      selectOptions = getAvailableFieldOptions(layout, options, field.path).map((option2) => ({
-        value: option2.path,
-        label: option2.label,
-        sublabel: option2.path
+      selectOptions = getAvailableFieldOptions(layout, options, field.path).map((option) => ({
+        value: option.path,
+        label: option.label,
+        sublabel: option.path
       }));
     } else if (kind === "field-display") {
-      const option2 = findFieldOption(options, field.path);
-      value = field.display ?? option2?.display ?? "text";
+      const option = findFieldOption(options, field.path);
+      value = field.display ?? option?.display ?? "text";
       ariaLabel = "Display";
-      selectOptions = getDisplayOptions(!!option2?.children?.length);
+      selectOptions = getDisplayOptions(!!option?.children?.length);
     } else if (kind === "field-center") {
       value = field.center === true ? "yes" : "no";
       ariaLabel = "Center chips";
@@ -6520,10 +6654,10 @@ function mountLayoutSelects(root, layout, options, redraw) {
       value = child.path;
       ariaLabel = "Card field";
       searchable = true;
-      selectOptions = getAvailableChildOptions(field, parentOption?.children ?? [], child.path).map((option2) => ({
-        value: option2.path,
-        label: option2.label,
-        sublabel: option2.path
+      selectOptions = getAvailableChildOptions(field, parentOption?.children ?? [], child.path).map((option) => ({
+        value: option.path,
+        label: option.label,
+        sublabel: option.path
       }));
     } else if (kind === "child-display" && childIndex !== null) {
       const child = field.fields?.[childIndex];
@@ -6552,11 +6686,11 @@ function mountLayoutSelects(root, layout, options, redraw) {
       searchPlaceholder: searchable ? "Search fields..." : undefined,
       onChange: (nextValue) => {
         if (kind === "field-path") {
-          const option2 = findFieldOption(options, nextValue);
+          const option = findFieldOption(options, nextValue);
           field.path = nextValue;
-          field.label = option2?.label ?? humanizeTrackerKey(nextValue.split(".").pop() || nextValue);
-          field.display = option2?.display ?? "text";
-          field.fields = option2?.children?.slice(0, 4).map((child) => ({
+          field.label = option?.label ?? humanizeTrackerKey(nextValue.split(".").pop() || nextValue);
+          field.display = option?.display ?? "text";
+          field.fields = option?.children?.slice(0, 4).map((child) => ({
             path: child.path,
             label: child.label,
             display: child.display === "character_cards" ? "text" : child.display
@@ -6568,10 +6702,10 @@ function mountLayoutSelects(root, layout, options, redraw) {
           return;
         } else if (kind === "child-path" && childIndex !== null && field.fields?.[childIndex]) {
           const parentOption = findFieldOption(options, field.path);
-          const option2 = parentOption?.children?.find((child) => child.path === nextValue);
+          const option = parentOption?.children?.find((child) => child.path === nextValue);
           field.fields[childIndex].path = nextValue;
-          field.fields[childIndex].label = option2?.label ?? humanizeTrackerKey(nextValue.split(".").pop() || nextValue);
-          field.fields[childIndex].display = option2?.display === "character_cards" ? "text" : option2?.display ?? "text";
+          field.fields[childIndex].label = option?.label ?? humanizeTrackerKey(nextValue.split(".").pop() || nextValue);
+          field.fields[childIndex].display = option?.display === "character_cards" ? "text" : option?.display ?? "text";
         } else if (kind === "child-display" && childIndex !== null && field.fields?.[childIndex]) {
           field.fields[childIndex].display = nextValue;
         } else if (kind === "child-center" && childIndex !== null && field.fields?.[childIndex]) {
@@ -6669,12 +6803,12 @@ function reindexLayoutEditor(root) {
 function getDirectLayoutItems(container, attribute) {
   return Array.from(container.children).filter((element) => element instanceof HTMLElement && element.hasAttribute(attribute));
 }
-function setLayoutDataIndex(root, key, index2) {
+function setLayoutDataIndex(root, key, index) {
   const attribute = `data-${key}`;
   if (root.hasAttribute(attribute))
-    root.dataset[key] = String(index2);
+    root.dataset[key] = String(index);
   for (const element of root.querySelectorAll(`[${attribute}]`)) {
-    element.dataset[key] = String(index2);
+    element.dataset[key] = String(index);
   }
 }
 function destroyLayoutSortables(instances) {
@@ -6699,12 +6833,12 @@ function getLayoutItemCount(layout, kind, sectionIndex, fieldIndex) {
     return 0;
   return section.fields[fieldIndex]?.fields?.length ?? 0;
 }
-function announceLayoutReorder(root, kind, index2, count, boundary = false) {
+function announceLayoutReorder(root, kind, index, count, boundary = false) {
   const announcer = root.querySelector("[data-layout-announcer]");
   if (!announcer)
     return;
   const item = kind === "section" ? "Section" : kind === "field" ? "Field" : "Card field";
-  announcer.textContent = boundary ? `${item} is already at the ${index2 === 0 ? "first" : "last"} position.` : `${item} moved to position ${index2 + 1} of ${count}.`;
+  announcer.textContent = boundary ? `${item} is already at the ${index === 0 ? "first" : "last"} position.` : `${item} moved to position ${index + 1} of ${count}.`;
 }
 function reorderLayoutItem(layout, kind, from, to, sectionIndex, fieldIndex) {
   if (kind === "section")
@@ -6825,7 +6959,7 @@ function defaultDisplayForSchema(schema, path) {
   return "text";
 }
 function findFieldOption(options, path) {
-  return options.find((option2) => option2.path === path);
+  return options.find((option) => option.path === path);
 }
 function getAvailableFieldOptions(layout, options, currentPath) {
   const used = new Set;
@@ -6835,28 +6969,28 @@ function getAvailableFieldOptions(layout, options, currentPath) {
         used.add(field.path);
     }
   }
-  const available = options.filter((option2) => !used.has(option2.path));
-  if (currentPath && !available.some((option2) => option2.path === currentPath)) {
+  const available = options.filter((option) => !used.has(option.path));
+  if (currentPath && !available.some((option) => option.path === currentPath)) {
     available.unshift({ path: currentPath, label: `${humanizeTrackerKey(currentPath.split(".").pop() || currentPath)} (missing from schema)`, display: "text" });
   }
   return available;
 }
 function getAvailableChildOptions(parent, options, currentPath) {
   const used = new Set((parent.fields ?? []).map((field) => field.path).filter((path) => path && path !== currentPath));
-  const available = options.filter((option2) => !used.has(option2.path));
-  if (currentPath && !available.some((option2) => option2.path === currentPath)) {
+  const available = options.filter((option) => !used.has(option.path));
+  if (currentPath && !available.some((option) => option.path === currentPath)) {
     available.unshift({ path: currentPath, label: `${humanizeTrackerKey(currentPath.split(".").pop() || currentPath)} (missing from schema)`, display: "text" });
   }
   return available;
 }
-function createFieldFromOption(option2, maxChildren = 4) {
-  if (!option2)
+function createFieldFromOption(option, maxChildren = 4) {
+  if (!option)
     return { path: "", label: "", display: "text" };
   return {
-    path: option2.path,
-    label: option2.label,
-    display: option2.display,
-    fields: option2.display === "character_cards" ? option2.children?.slice(0, maxChildren).map((child) => ({ path: child.path, label: child.label, display: child.display === "character_cards" ? "text" : child.display })) : undefined
+    path: option.path,
+    label: option.label,
+    display: option.display,
+    fields: option.display === "character_cards" ? option.children?.slice(0, maxChildren).map((child) => ({ path: child.path, label: child.label, display: child.display === "character_cards" ? "text" : child.display })) : undefined
   };
 }
 function createSchemaDefaultLayout(schema) {
@@ -6867,7 +7001,7 @@ function createSchemaDefaultLayout(schema) {
   return {
     sections: [{
       title,
-      fields: options.map((option2) => createFieldFromOption(option2, Number.POSITIVE_INFINITY))
+      fields: options.map((option) => createFieldFromOption(option, Number.POSITIVE_INFINITY))
     }]
   };
 }
@@ -6884,8 +7018,8 @@ function moveItem(items, from, to) {
 function readIndex(value) {
   if (value === undefined)
     return null;
-  const index2 = Number(value);
-  return Number.isInteger(index2) && index2 >= 0 ? index2 : null;
+  const index = Number(value);
+  return Number.isInteger(index) && index >= 0 ? index : null;
 }
 function validateLayout(layout, options) {
   if (!layout.sections.length)
@@ -6895,8 +7029,8 @@ function validateLayout(layout, options) {
     section.fields = section.fields.filter((field) => field.path.trim());
     for (const field of section.fields) {
       field.path = field.path.trim();
-      const option2 = findFieldOption(options, field.path);
-      if (!option2)
+      const option = findFieldOption(options, field.path);
+      if (!option)
         throw new Error(`Field "${field.path}" no longer exists in the current schema.`);
       if (Object.prototype.hasOwnProperty.call(field, "label"))
         field.label = field.label?.trim() ?? "";
@@ -6907,7 +7041,7 @@ function validateLayout(layout, options) {
         center: child.display === "chips" ? child.center === true : undefined
       }));
       for (const child of field.fields ?? []) {
-        if (!findFieldOption(option2.children ?? [], child.path)) {
+        if (!findFieldOption(option.children ?? [], child.path)) {
           throw new Error(`Card field "${child.path}" no longer exists under "${field.path}" in the current schema.`);
         }
       }
@@ -7056,7 +7190,7 @@ function renderEditableField(field, draft, rootSchema, basePath) {
     return `
       <div class="scenemap-edit-card-list">
         <div class="scenemap-character-grid">
-          ${cards.map((_, index2) => renderEditableCharacterCard(draft, index2, field, path, rootSchema)).join("")}
+          ${cards.map((_, index) => renderEditableCharacterCard(draft, index, field, path, rootSchema)).join("")}
         </div>
         <button type="button" class="scenemap-edit-add-card" data-action="add-tracker-card" data-edit-path="${trackerEditPathAttr(path)}">+ Add item</button>
       </div>
@@ -7069,15 +7203,15 @@ function renderEditableField(field, draft, rootSchema, basePath) {
 }
 function renderEditableChips(path, label, values, rootSchema, centered) {
   const labelMarkup = label ? `<span>${escapeHtml(label)}</span>` : "";
-  const chips = values.map((value, index2) => {
-    const itemPath = [...path, index2];
+  const chips = values.map((value, index) => {
+    const itemPath = [...path, index];
     const schema = getTrackerSchemaAtPath(rootSchema, itemPath);
     const kind = getTrackerEditControlKind(schema, value);
-    const common = `data-tracker-edit-control="true" data-tracker-edit-chip="true" data-edit-path="${trackerEditPathAttr(itemPath)}" data-edit-kind="${kind}" aria-label="${escapeAttr(`${label || "Item"} ${index2 + 1}`)}"`;
+    const common = `data-tracker-edit-control="true" data-tracker-edit-chip="true" data-edit-path="${trackerEditPathAttr(itemPath)}" data-edit-kind="${kind}" aria-label="${escapeAttr(`${label || "Item"} ${index + 1}`)}"`;
     let control;
     if (kind === "enum") {
       const options = Array.isArray(schema.enum) ? schema.enum : [];
-      control = `<select ${common}>${options.map((option2, optionIndex) => `<option value="${optionIndex}" ${jsonValuesEqual(option2, value) ? "selected" : ""}>${escapeHtml(formatDisplayValue(option2))}</option>`).join("")}</select>`;
+      control = `<select ${common}>${options.map((option, optionIndex) => `<option value="${optionIndex}" ${jsonValuesEqual(option, value) ? "selected" : ""}>${escapeHtml(formatDisplayValue(option))}</option>`).join("")}</select>`;
     } else if (kind === "boolean") {
       control = `<select ${common}><option value="true" ${value === true ? "selected" : ""}>Yes</option><option value="false" ${value !== true ? "selected" : ""}>No</option></select>`;
     } else {
@@ -7085,7 +7219,7 @@ function renderEditableChips(path, label, values, rootSchema, centered) {
       const size = Math.max(4, Math.min(24, formatDisplayValue(value).length + 1));
       control = `<input type="${inputType}" ${common} size="${size}" ${kind === "integer" ? 'step="1"' : kind === "number" ? 'step="any"' : ""} value="${escapeAttr(value ?? "")}">`;
     }
-    return `<span class="scenemap-edit-chip">${control}<button type="button" data-action="remove-tracker-chip" data-edit-path="${trackerEditPathAttr(path)}" data-edit-index="${index2}" title="Remove item" aria-label="Remove ${escapeAttr(formatDisplayValue(value) || `item ${index2 + 1}`)}">×</button></span>`;
+    return `<span class="scenemap-edit-chip">${control}<button type="button" data-action="remove-tracker-chip" data-edit-path="${trackerEditPathAttr(path)}" data-edit-index="${index}" title="Remove item" aria-label="Remove ${escapeAttr(formatDisplayValue(value) || `item ${index + 1}`)}">×</button></span>`;
   }).join("");
   return `
     <div class="scenemap-field scenemap-edit-chip-field">
@@ -7097,8 +7231,8 @@ function renderEditableChips(path, label, values, rootSchema, centered) {
     </div>
   `;
 }
-function renderEditableCharacterCard(draft, index2, parentField, parentPath, rootSchema) {
-  const itemPath = [...parentPath, index2];
+function renderEditableCharacterCard(draft, index, parentField, parentPath, rootSchema) {
+  const itemPath = [...parentPath, index];
   const record = getRecord3(getTrackerValueAtPath(draft, itemPath));
   const namePath = [...itemPath, "name"];
   const nameSchema = getTrackerSchemaAtPath(rootSchema, namePath);
@@ -7112,8 +7246,8 @@ function renderEditableCharacterCard(draft, index2, parentField, parentPath, roo
   return `
     <article class="scenemap-character scenemap-character-edit">
       <div class="scenemap-character-edit-header">
-        ${hasEditableName ? renderTrackerEditControl(namePath, "Character name", "text", record.name, rootSchema, true) : `<h4>${escapeHtml(`Item ${index2 + 1}`)}</h4>`}
-        <button type="button" class="scenemap-icon-btn scenemap-edit-remove-card" data-action="remove-tracker-card" data-edit-path="${trackerEditPathAttr(parentPath)}" data-edit-index="${index2}" title="Remove item" aria-label="Remove item">${layoutIcon("trash")}</button>
+        ${hasEditableName ? renderTrackerEditControl(namePath, "Character name", "text", record.name, rootSchema, true) : `<h4>${escapeHtml(`Item ${index + 1}`)}</h4>`}
+        <button type="button" class="scenemap-icon-btn scenemap-edit-remove-card" data-action="remove-tracker-card" data-edit-path="${trackerEditPathAttr(parentPath)}" data-edit-index="${index}" title="Remove item" aria-label="Remove item">${layoutIcon("trash")}</button>
       </div>
       ${fields.map((field) => renderEditableField(field, draft, rootSchema, itemPath)).join("")}
     </article>
@@ -7127,7 +7261,7 @@ function renderTrackerEditControl(path, label, display, value, rootSchema, chara
   let control;
   if (kind === "enum") {
     const options = Array.isArray(schema.enum) ? schema.enum : [];
-    control = `<select ${common}>${options.map((option2, index2) => `<option value="${index2}" ${jsonValuesEqual(option2, value) ? "selected" : ""}>${escapeHtml(formatDisplayValue(option2))}</option>`).join("")}</select>`;
+    control = `<select ${common}>${options.map((option, index) => `<option value="${index}" ${jsonValuesEqual(option, value) ? "selected" : ""}>${escapeHtml(formatDisplayValue(option))}</option>`).join("")}</select>`;
   } else if (kind === "boolean") {
     control = `<select ${common}><option value="true" ${value === true ? "selected" : ""}>Yes</option><option value="false" ${value !== true ? "selected" : ""}>No</option></select>`;
   } else if (kind === "number" || kind === "integer") {
@@ -7197,7 +7331,7 @@ function renderField(field, tracker) {
   if (display === "progress")
     return renderProgressField(label, field.path, value);
   if (display === "character_cards" && Array.isArray(value)) {
-    return `<div class="scenemap-character-grid">${value.map((item, index2) => renderCharacterCard(item, index2, field.fields ?? [])).join("")}</div>`;
+    return `<div class="scenemap-character-grid">${value.map((item, index) => renderCharacterCard(item, index, field.fields ?? [])).join("")}</div>`;
   }
   return `<div class="scenemap-field">${labelMarkup}<p class="${display === "subtle" ? "subtle" : ""} ${display === "mono" ? "mono" : ""}">${escapeHtml(formatDisplayValue(value))}</p></div>`;
 }
@@ -7227,9 +7361,9 @@ function renderProgressField(label, path, value) {
     </div>
   `;
 }
-function renderCharacterCard(value, index2, fields) {
+function renderCharacterCard(value, index, fields) {
   const record = getRecord3(value);
-  const name = formatDisplayValue(record.name) || `Character ${index2 + 1}`;
+  const name = formatDisplayValue(record.name) || `Character ${index + 1}`;
   const innerFields = fields.length > 0 ? fields.map((field) => renderField(field, record)).join("") : Object.entries(record).filter(([key]) => key !== "name").map(([key, child]) => renderField({ path: key, label: humanizeTrackerKey(key), display: key === "postureAndInteraction" ? "mono" : "text" }, { [key]: child })).join("");
   return `<article class="scenemap-character"><h4>${escapeHtml(name)}</h4>${innerFields}</article>`;
 }
@@ -7427,6 +7561,20 @@ var styles = `
 .scenemap-settings-group { border: 1px solid var(--lumiverse-border); background: var(--lumiverse-fill-subtle); border-radius: var(--lumiverse-radius, 8px); padding: 12px; }
 .scenemap-settings-group h3 { margin: 0 0 10px; color: var(--lumiverse-accent); font-size: 11px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
 .scenemap-settings-shell label { display: flex; flex-direction: column; gap: 5px; margin: 10px 0; font-size: 12px; color: var(--lumiverse-text-muted); }
+.scenemap-lorebook-count { flex: 0 0 auto; padding: 3px 7px; border: 1px solid var(--lumiverse-border); border-radius: 999px; color: var(--lumiverse-text-muted); font-size: 10px; font-weight: 600; }
+.scenemap-lorebook-hint { margin: 0 0 14px; color: var(--lumiverse-text-muted); font-size: 11px; line-height: 1.5; }
+.scenemap-lorebook-groups { display: grid; gap: 14px; }
+.scenemap-lorebook-group { min-width: 0; margin: 0; padding: 0; border: 0; }
+.scenemap-lorebook-group legend { display: flex; align-items: center; gap: 7px; width: 100%; padding: 0 0 7px; color: var(--lumiverse-text); font-size: 12px; font-weight: 650; }
+.scenemap-lorebook-group legend svg { flex: 0 0 auto; color: var(--lumiverse-primary-text, var(--lumiverse-accent)); }
+.scenemap-lorebook-source-count { margin-left: auto; color: var(--lumiverse-text-muted); font-size: 10px; font-weight: 500; }
+.scenemap-settings-shell .scenemap-lorebook-row { flex-direction: row; align-items: center; gap: 9px; margin: 4px 0 0; padding: 9px 10px; border: 1px solid var(--lumiverse-border); border-radius: var(--lumiverse-radius, 8px); background: var(--lumiverse-fill-subtle); color: var(--lumiverse-text); cursor: pointer; transition: border-color .15s, background .15s; }
+.scenemap-lorebook-row:hover { border-color: var(--lumiverse-border-hover, var(--lumiverse-accent)); background: var(--lumiverse-fill); }
+.scenemap-settings-shell .scenemap-lorebook-row:has(input:checked) { border-color: var(--lumiverse-primary-050, var(--lumiverse-accent)); background: var(--lumiverse-primary-015, color-mix(in srgb, var(--lumiverse-accent) 10%, transparent)); }
+.scenemap-lorebook-row input[type="checkbox"] { flex: 0 0 auto; width: 16px; height: 16px; margin: 0; accent-color: var(--lumiverse-primary, var(--lumiverse-accent)); cursor: pointer; }
+.scenemap-lorebook-row input:focus-visible { outline: 2px solid var(--lumiverse-primary, var(--lumiverse-accent)); outline-offset: 3px; }
+.scenemap-lorebook-row > span { min-width: 0; overflow-wrap: anywhere; line-height: 1.4; }
+.scenemap-lorebook-empty { margin: 0; padding: 5px 0; color: var(--lumiverse-text-muted); font-size: 11px; line-height: 1.5; }
 .scenemap-auto-row { display: flex; flex-direction: column; gap: 9px; border-top: 1px solid var(--lumiverse-border); border-bottom: 1px solid var(--lumiverse-border); padding: 9px 0; margin: 10px 0; }
 .scenemap-interval-field[hidden] { display: none; }
 .scenemap-sampler-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
@@ -7593,6 +7741,6 @@ body.scenemap-layout-is-dragging, body.scenemap-layout-is-dragging * { cursor: g
 }
 `;
 export {
-  setup,
-  createSchemaDefaultLayout
+  createSchemaDefaultLayout,
+  setup
 };
